@@ -6,6 +6,7 @@ dist/
 coverage/
 coverage.json
 .env
+secrets.yaml
 
 workflow/node_modules/
 workflow/.env

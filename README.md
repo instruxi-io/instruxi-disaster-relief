@@ -77,10 +77,13 @@ Required links per Chainlink hackathon submission rules:
 | [`workflow/main.ts`](workflow/main.ts) | CRE workflow entry point — EVM Log Trigger on `RequestSent` |
 | [`workflow/logCallback.ts`](workflow/logCallback.ts) | CRE log handler — queries 3 disaster APIs, checks Enforcer eligibility, writes `onReport()`, notifies RWA Gateway |
 | [`workflow/workflow.yaml`](workflow/workflow.yaml) | CRE CLI settings (staging + production targets) |
-| [`workflow/config.staging.json`](workflow/config.staging.json) | Staging config — Sepolia, gas limit, Instruxi URLs |
+| [`workflow/config.staging.json`](workflow/config.staging.json) | Staging config — Sepolia, chain selector, gas limit, Instruxi URLs |
 | [`workflow/config.production.json`](workflow/config.production.json) | Production config template |
 | [`contracts/utils/ChainlinkCREClient.sol`](contracts/utils/ChainlinkCREClient.sol) | Abstract CRE base — `_sendRequest()` / `_validateAndFulfillRequest()` / `_fulfillRequest()` |
 | [`contracts/ReliefTreasury.sol`](contracts/ReliefTreasury.sol) | Main contract — inherits `ChainlinkCREClient`, implements `onReport()` |
+| [`contracts/interfaces/IReliefTreasury.sol`](contracts/interfaces/IReliefTreasury.sol) | Interface — declares `onReport()`, `fulfillRequest()`, `cancelRequest()` CRE callback signatures |
+| [`deploy/001_deploy_relief_treasury.ts`](deploy/001_deploy_relief_treasury.ts) | Deploy script — deploys treasury and authorizes Chainlink Forwarder post-deploy |
+| [`tasks/relief-tasks.ts`](tasks/relief-tasks.ts) | Hardhat tasks — `request-verification` emits `RequestSent` to trigger CRE, `register-event`, `activate-event` |
 
 ### CRE Integration Details
 
