@@ -1,0 +1,26 @@
+# ==========================================================================
+# CRE WORKFLOW SETTINGS — Disaster Relief Distribution
+# ==========================================================================
+# Run simulation:
+#   cre workflow simulate disaster-relief-workflow \
+#     --non-interactive \
+#     --trigger-index 0 \
+#     --evm-tx-hash <TX_HASH_CONTAINING_REQUEST_SENT> \
+#     --evm-event-index 0 \
+#     --target staging-settings
+
+staging-settings:
+  user-workflow:
+    workflow-name: "disaster-relief-staging"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.staging.json"
+    secrets-path: "../secrets.yaml"
+
+production-settings:
+  user-workflow:
+    workflow-name: "disaster-relief-production"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.production.json"
+    secrets-path: "../secrets.yaml"

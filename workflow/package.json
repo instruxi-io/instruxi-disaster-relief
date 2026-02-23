@@ -1,0 +1,17 @@
+{
+  "name": "disaster-relief-workflow",
+  "version": "1.0.0",
+  "description": "CRE workflow for disaster relief event verification and disbursement",
+  "main": "dist/main.js",
+  "private": true,
+  "scripts": {
+    "postinstall": "bunx cre-setup"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@chainlink/cre-sdk": "^1.0.1"
+  },
+  "devDependencies": {
+    "@types/bun": "1.2.21"
+  }
+}
