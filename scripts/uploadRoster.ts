@@ -10,7 +10,7 @@
  *   3. POST /os/file/metadata         — tag with programId, regionId, timestamp
  *
  * CSV schema (from playbook):
- *   phone_or_ref, regionId, eligibilityStatus, payoutTier
+ *   phone_or_ref, address, regionId, eligibilityStatus, payoutTier, email, first_name, last_name
  *
  * Usage:
  *   npx ts-node scripts/uploadRoster.ts \

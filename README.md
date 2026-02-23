@@ -168,10 +168,15 @@ Update `workflow/config.staging.json` with the deployed `reliefTreasuryAddress`.
 
 ```bash
 # Via Hardhat tasks
-npx hardhat fund-treasury --network sepolia --amount 10000
-npx hardhat register-event --network sepolia --event-id 0x... --per-event-cap 5000
-npx hardhat request-verification --network sepolia --event-id 0x... \
-  --external-ref '{"usgsId":"us7000abc","region":"US","minMagnitude":5.0}'
+npx hardhat deposit-usdc --network sepolia \
+  --contract 0x<TREASURY> --usdc 0x<USDC> --amount 10000000000
+
+npx hardhat register-event --network sepolia \
+  --contract 0x<TREASURY> --eventid 0x... --cap 5000000000
+
+npx hardhat request-verification --network sepolia \
+  --contract 0x<TREASURY> --eventid 0x... \
+  --ref '{"usgsId":"us7000abc","region":"US","minMagnitude":5.0}'
 ```
 
 The `requestEventVerification` call emits `RequestSent` → CRE picks it up, queries USGS + GDACS + ReliefWeb (2-of-3), writes `onReport()` back.
@@ -331,11 +336,29 @@ npx hardhat deploy --network sepolia
 ### Hardhat Tasks
 
 ```bash
-npx hardhat fund-treasury --network sepolia --amount 10000
-npx hardhat register-event --network sepolia --event-id 0x... --per-event-cap 5000
-npx hardhat request-verification --network sepolia --event-id 0x... --external-ref '{...}'
-npx hardhat activate-event --network sepolia --event-id 0x...
-npx hardhat treasury-status --network sepolia [--eventid 0x...]
+# All tasks require --contract <ReliefTreasury address>
+
+npx hardhat deposit-usdc --network sepolia \
+  --contract 0x<TREASURY> --usdc 0x<USDC> --amount 1000000000
+
+npx hardhat register-event --network sepolia \
+  --contract 0x<TREASURY> --eventid 0x... --cap 100000000
+
+npx hardhat request-verification --network sepolia \
+  --contract 0x<TREASURY> --eventid 0x... \
+  --ref '{"usgsId":"us7000abc","region":"US","minMagnitude":5.0}'
+
+npx hardhat activate-event --network sepolia \
+  --contract 0x<TREASURY> --eventid 0x...
+
+npx hardhat set-eligibility --network sepolia \
+  --contract 0x<TREASURY> --eventid 0x... --recipient 0x... --eligible true
+
+npx hardhat claim-disbursement --network sepolia \
+  --contract 0x<TREASURY> --eventid 0x...
+
+npx hardhat treasury-status --network sepolia \
+  --contract 0x<TREASURY> [--eventid 0x...]
 ```
 
 ---
