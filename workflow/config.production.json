@@ -1,6 +1,6 @@
 {
   "reliefTreasuryAddress": "0x0000000000000000000000000000000000000000",
-  "chainSelectorName": "ethereum-testnet-sepolia",
+  "chainSelectorName": "ethereum-mainnet",
   "gasLimit": "500000",
   "instruxi": {
     "baseUrl": "https://api.instruxi.io",

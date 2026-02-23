@@ -222,6 +222,45 @@ function checkEnforcerEligibility(
   }
 }
 
+// ── Notify RWA Gateway via CRE webhook ────────────────────────────────────
+
+/**
+ * After a CRE fulfillment is written onchain, notify the RWA Gateway.
+ * The Gateway's webhook handler (POST /api/webhooks/cre) automatically
+ * triggers TrustSync attestation creation as a side-effect.
+ */
+function notifyGateway(
+  runtime: Runtime<WorkflowConfig>,
+  payload: {
+    requestId: string;
+    requestType: "event_verification" | "disbursement";
+    txHash: string;
+    result: boolean;
+    eventId?: string;
+    recipient?: string;
+  }
+): void {
+  const rwGatewayUrl = runtime.config.instruxi.rwGatewayUrl;
+  if (!rwGatewayUrl) {
+    runtime.log("[Gateway] rwGatewayUrl not configured — skipping webhook");
+    return;
+  }
+
+  try {
+    const http = new cre.capabilities.HTTPCapability();
+    const res = http.request(runtime, {
+      method: "POST",
+      url: `${rwGatewayUrl}/api/webhooks/cre`,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).result();
+    runtime.log(`[Gateway] CRE webhook → ${res.statusCode}`);
+  } catch (err) {
+    // Non-critical: log but do not fail the fulfillment
+    runtime.log(`[Gateway] Webhook error (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 // ── Write report to ReliefTreasury ────────────────────────────────────────
 
 function writeReport(
@@ -287,6 +326,17 @@ function handleEventVerification(
   const report  = encodeReport(PREFIX_EVENT_VERIFICATION, requestId, verified);
   const txHash  = writeReport(runtime, report);
   runtime.log(`[Write] ✓ tx=${txHash}`);
+
+  // Notify RWA Gateway — triggers TrustSync attestation creation
+  const [, eventId] = decodeAbiParameters(EVENT_VERIFICATION_PARAMS, requestData);
+  notifyGateway(runtime, {
+    requestId,
+    requestType: "event_verification",
+    txHash,
+    result: verified,
+    eventId: eventId as string,
+  });
+
   return `EventVerification: verified=${verified} tx=${txHash}`;
 }
 
@@ -318,6 +368,18 @@ function handleDisbursement(
   const report = encodeReport(PREFIX_DISBURSEMENT, requestId, eligible);
   const txHash = writeReport(runtime, report);
   runtime.log(`[Write] ✓ tx=${txHash}`);
+
+  // Notify RWA Gateway — triggers TrustSync proof-of-disbursement attestation
+  const [disbEventId] = decodeAbiParameters(DISBURSEMENT_PARAMS, requestData);
+  notifyGateway(runtime, {
+    requestId,
+    requestType: "disbursement",
+    txHash,
+    result: eligible,
+    eventId:   disbEventId as string,
+    recipient,
+  });
+
   return `Disbursement: eligible=${eligible} tx=${txHash}`;
 }
 

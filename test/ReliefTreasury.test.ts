@@ -29,7 +29,7 @@ async function deployFixture() {
   const [deployer, admin, fulfiller, recipient, other] = await ethers.getSigners();
 
   const MockUSDC = await ethers.getContractFactory("MockUSDC");
-  const usdc = (await MockUSDC.deploy()) as MockUSDC;
+  const usdc = (await MockUSDC.deploy()) as unknown as MockUSDC;
 
   const PER_RECIPIENT_CAP = USDC(50);    // $50
   const PROGRAM_CAP       = USDC(100_000); // $100,000
@@ -40,7 +40,7 @@ async function deployFixture() {
     PER_RECIPIENT_CAP,
     PROGRAM_CAP,
     admin.address
-  )) as ReliefTreasury;
+  )) as unknown as ReliefTreasury;
 
   // Authorize the test fulfiller
   await treasury.connect(admin).setFulfillerAuthorization(fulfiller.address, true);
@@ -365,7 +365,7 @@ describe("ReliefTreasury", function () {
       const [, admin2, fulfiller2, r1, r2] = await ethers.getSigners();
 
       const MockUSDC = await ethers.getContractFactory("MockUSDC");
-      const usdc = await MockUSDC.deploy();
+      const usdc = (await MockUSDC.deploy()) as unknown as MockUSDC;
 
       // Set perRecipientCap = $60, perEventCap = $100 — two recipients exhaust it
       const perRecipientCap = USDC(60);
@@ -373,7 +373,7 @@ describe("ReliefTreasury", function () {
       const ReliefTreasury = await ethers.getContractFactory("ReliefTreasury");
       const treasury = (await ReliefTreasury.deploy(
         await usdc.getAddress(), perRecipientCap, programCap, admin2.address
-      )) as ReliefTreasury;
+      )) as unknown as ReliefTreasury;
 
       await treasury.connect(admin2).setFulfillerAuthorization(fulfiller2.address, true);
       await usdc.mint(admin2.address, USDC(1_000));

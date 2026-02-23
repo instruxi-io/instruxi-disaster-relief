@@ -1,0 +1,11 @@
+phone_or_ref,address,regionId,eligibilityStatus,payoutTier,email,first_name,last_name
++15551234001,0x1111111111111111111111111111111111111111,US-CA,eligible,standard,victim1@example.com,Alice,Smith
++15551234002,0x2222222222222222222222222222222222222222,US-CA,eligible,priority,victim2@example.com,Bob,Jones
++15551234003,0x3333333333333333333333333333333333333333,US-CA,eligible,standard,victim3@example.com,Carol,White
++15551234004,0x4444444444444444444444444444444444444444,US-CA,ineligible,none,unverified@example.com,Dan,Brown
++15551234005,0x5555555555555555555555555555555555555555,US-CA,eligible,standard,victim5@example.com,Eve,Davis
++15551234006,0x6666666666666666666666666666666666666666,US-TX,eligible,standard,victim6@example.com,Frank,Miller
++15551234007,0x7777777777777777777777777777777777777777,US-TX,eligible,priority,victim7@example.com,Grace,Wilson
++15551234008,0x8888888888888888888888888888888888888888,US-TX,ineligible,none,unverified2@example.com,Henry,Moore
++15551234009,0x9999999999999999999999999999999999999999,US-FL,eligible,standard,victim9@example.com,Iris,Taylor
++15551234010,0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,US-FL,eligible,standard,victim10@example.com,Jack,Anderson

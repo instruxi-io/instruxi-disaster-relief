@@ -29,6 +29,7 @@ export type WorkflowConfig = {
   instruxi: {
     baseUrl: string;
     eligibilityGroupPrefix: string;
+    rwGatewayUrl: string;   // RWA Gateway base URL for CRE webhook notifications
   };
 };
 

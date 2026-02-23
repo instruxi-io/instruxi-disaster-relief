@@ -7,7 +7,12 @@
     "test": "hardhat test",
     "deploy:localhost": "hardhat deploy --network localhost",
     "deploy:sepolia": "hardhat deploy --network sepolia",
-    "deploy:arbitrumSepolia": "hardhat deploy --network arbitrumSepolia"
+    "deploy:arbitrumSepolia": "hardhat deploy --network arbitrumSepolia",
+    "setup-groups": "ts-node scripts/setupGroups.ts",
+    "onboard-recipient": "ts-node scripts/onboardRecipient.ts",
+    "upload-roster": "ts-node scripts/uploadRoster.ts",
+    "process-roster": "ts-node scripts/processRoster.ts",
+    "attest": "ts-node scripts/createAttestation.ts"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",
@@ -19,6 +24,7 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5.4.0"
+    "@openzeppelin/contracts": "^5.4.0",
+    "dotenv": "^16.4.5"
   }
 }
