@@ -316,6 +316,12 @@ cre workflow simulate disaster-relief-workflow \
 
 ---
 
+## Deployment
+
+See **[DEPLOYMENT.md](DEPLOYMENT.md)** for the full step-by-step guide: credentials checklist → Sepolia deploy → contract verification → CRE simulation → end-to-end scripts run → attestation.
+
+---
+
 ## Smart Contract Development
 
 ### Prerequisites
