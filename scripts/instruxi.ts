@@ -141,17 +141,16 @@ export async function registerAccount(
 /**
  * Authorize an action on a resource via OPA Rego policy.
  * POST /enforcer/auth/authorize
- * Returns { allowed: boolean }
+ * Returns the full OPA response (always contains at minimum { allowed: boolean })
  */
 export async function authorize(
   policyId: string,
   input: Record<string, unknown>
-): Promise<boolean> {
-  const res = await req<{ allowed: boolean }>(
+): Promise<ApiResponse<Record<string, unknown>>> {
+  return req<ApiResponse<Record<string, unknown>>>(
     "POST", "/enforcer/auth/authorize",
     { policy_id: policyId, input }
   );
-  return res.allowed;
 }
 
 /**

@@ -66,20 +66,32 @@ task("activate-event", "Activate a verified event to enable disbursements")
   });
 
 // ================================================================
-//  set-eligibility
+//  set-tier-amounts
 // ================================================================
-task("set-eligibility", "Manually set recipient eligibility (test use)")
+task("set-tier-amounts", "Set USDC payout amounts for each tier (admin only)")
   .addParam("contract", "ReliefTreasury address")
-  .addParam("eventid", "Event ID (hex bytes32)")
-  .addParam("recipient", "Recipient wallet address")
-  .addParam("eligible", "true or false", "true", types.string)
-  .setAction(async ({ contract, eventid, recipient, eligible }, hre) => {
+  .addParam("tiers", "Comma-separated tier numbers, e.g. 1,2")
+  .addParam("amounts", "Comma-separated raw USDC amounts (6 dec), e.g. 50000000,100000000")
+  .setAction(async ({ contract, tiers, amounts }, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const relief = await hre.ethers.getContractAt("ReliefTreasury", contract, signer);
-    const isEligible = eligible === "true";
-    const tx = await (relief as any).setEligibility(eventid, recipient, isEligible);
+
+    const tierArr   = (tiers as string).split(",").map((t: string) => parseInt(t.trim(), 10));
+    const amountArr = (amounts as string).split(",").map((a: string) => BigInt(a.trim()));
+
+    if (tierArr.length !== amountArr.length) {
+      console.error("Error: tiers and amounts must have the same number of entries");
+      process.exit(1);
+    }
+
+    console.log("Setting tier amounts:");
+    tierArr.forEach((t: number, i: number) =>
+      console.log(`  Tier ${t}: $${Number(amountArr[i]) / 1e6} USDC`)
+    );
+
+    const tx = await (relief as any).setTierAmounts(tierArr, amountArr);
     const receipt = await tx.wait();
-    console.log(`✅ Eligibility set to ${isEligible} for ${recipient}. Tx: ${receipt.hash}`);
+    console.log(`✅ Tier amounts set. Tx: ${receipt.hash}`);
   });
 
 // ================================================================
@@ -154,6 +166,18 @@ task("treasury-status", "Print ReliefTreasury status")
     console.log(`Program Cap:       $${Number(programCap) / 1e6} USDC`);
     console.log(`Remaining Cap:     $${Number(remaining) / 1e6} USDC`);
     console.log(`Per-Recipient Cap: $${Number(perRecipientCap) / 1e6} USDC`);
+
+    // Print configured tier amounts (tiers 1–5)
+    const tierAmounts: string[] = [];
+    for (let t = 1; t <= 5; t++) {
+      const amt: bigint = await (relief as any).getTierAmount(t);
+      if (amt > 0n) tierAmounts.push(`Tier ${t}: $${Number(amt) / 1e6} USDC`);
+    }
+    if (tierAmounts.length > 0) {
+      console.log("─".repeat(50));
+      console.log("Tier Amounts:");
+      tierAmounts.forEach((line) => console.log(`  ${line}`));
+    }
 
     if (eventid) {
       const ev = await (relief as any).getEventRecord(eventid);

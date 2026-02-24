@@ -3,25 +3,29 @@
  *
  * Admin-triggered roster ingestion pipeline. Fetches a CSV from Instruxi
  * Object Storage via presigned URL, validates schema, onboards each eligible
- * recipient into Enforcer, and archives the file.
+ * recipient into the correct tier-based Enforcer group, and archives the file.
  *
  * Pipeline (matches playbook steps 18-25):
  *   1. POST /enforcer/auth/authorize        — verify admin permission
  *   2. GET  /storage/file/presigned-url     — get time-limited download URL
  *   3. Fetch + parse CSV                    — validate schema, split eligible/rejected
  *   4. POST /profile/multi-create           — batch create profiles
- *   5. POST /admin/groups/account/add-multiple — assign eligible recipients to groups
+ *   5. POST /admin/groups/account/add-multiple — assign eligible recipients to tier group
  *   6. POST /storage/file/move              — archive processed file
  *
  * CSV columns (from playbook):
  *   phone_or_ref, regionId, eligibilityStatus, payoutTier
+ *
+ * payoutTier values map to Enforcer groups:
+ *   "standard" → tier 1 → Eligible:Program:Region:1
+ *   "priority"  → tier 2 → Eligible:Program:Region:2
  *
  * Usage:
  *   npx ts-node scripts/processRoster.ts \
  *     --file-id <instruxi-file-id> \
  *     --program US-FLOOD-2026 \
  *     --region US-CA \
- *     --eligible-group-ids "groupId1,groupId2" \
+ *     --tier-group-ids '{"1":"groupId_standard","2":"groupId_priority"}' \
  *     --policy-id <enforcer-admin-policy-id> \
  *     --caller-address 0xAdminAddress \
  *     [--archive-path processed/]
@@ -117,11 +121,17 @@ export interface ProcessRosterResult {
   archived: boolean;
 }
 
+// Maps payoutTier CSV values to onchain tier numbers
+const PAYOUT_TIER_MAP: Record<string, number> = {
+  standard: 1,
+  priority:  2,
+};
+
 export async function processRoster(opts: {
   fileId: string;
   program: string;
   region: string;
-  eligibleGroupIds: string[];
+  tierGroupIds: Record<number, string>;   // tier number → Enforcer group ID
   policyId?: string;
   callerAddress?: string;
   archivePath?: string;
@@ -130,7 +140,7 @@ export async function processRoster(opts: {
     fileId,
     program,
     region,
-    eligibleGroupIds,
+    tierGroupIds,
     policyId,
     callerAddress,
     archivePath = "processed/",
@@ -152,11 +162,12 @@ export async function processRoster(opts: {
   // Step 1: Admin authorization gate
   if (policyId && callerAddress) {
     console.log(`[authorize] Checking admin permission for ${callerAddress}...`);
-    const allowed = await authorize(policyId, {
+    const res = await authorize(policyId, {
       action: "process_roster",
       program,
       subject: callerAddress,
     });
+    const allowed = !!(res.data?.["allowed"] ?? (res as any).allowed);
     if (!allowed) {
       throw new Error(`Unauthorized: ${callerAddress} cannot process rosters for ${program}`);
     }
@@ -213,14 +224,24 @@ export async function processRoster(opts: {
       result.errors.push(`Profile batch create: ${msg}`);
     }
 
-    // Step 5: Assign eligible recipients to groups
-    if (eligibleGroupIds.length > 0) {
-      console.log(`[groups] Assigning ${eligibleRows.length} recipients to groups...`);
+    // Step 5: Assign eligible recipients to their tier-specific group
+    if (Object.keys(tierGroupIds).length > 0) {
+      console.log(`[groups] Assigning ${eligibleRows.length} recipients to tier groups...`);
       let groupedCount = 0;
 
       for (const row of eligibleRows) {
+        const tier = PAYOUT_TIER_MAP[row.payoutTier?.toLowerCase() ?? ""] ?? 0;
+        if (!tier) {
+          result.errors.push(`${row.address}: unknown payoutTier "${row.payoutTier}"`);
+          continue;
+        }
+        const groupId = tierGroupIds[tier];
+        if (!groupId) {
+          result.errors.push(`${row.address}: no group configured for tier ${tier}`);
+          continue;
+        }
         try {
-          await addAccountToGroups(row.address, eligibleGroupIds);
+          await addAccountToGroups(row.address, [groupId]);
           groupedCount++;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -255,22 +276,31 @@ async function main() {
     return i !== -1 ? args[i + 1] : undefined;
   };
 
-  const fileId          = get("--file-id");
-  const program         = get("--program");
-  const region          = get("--region");
-  const groupIdsRaw     = get("--eligible-group-ids") ?? "";
+  const fileId         = get("--file-id");
+  const program        = get("--program");
+  const region         = get("--region");
+  const tierGroupIdsRaw = get("--tier-group-ids") ?? "{}";
 
   if (!fileId || !program || !region) {
     console.error(
       "Usage: ts-node scripts/processRoster.ts \\\n" +
       "  --file-id <id> --program <name> --region <id> \\\n" +
-      "  --eligible-group-ids <id1,id2> \\\n" +
+      "  --tier-group-ids '{\"1\":\"groupId_standard\",\"2\":\"groupId_priority\"}' \\\n" +
       "  [--policy-id <id>] [--caller-address <0x...>] [--archive-path processed/]"
     );
     process.exit(1);
   }
 
-  const eligibleGroupIds = groupIdsRaw.split(",").map((g) => g.trim()).filter(Boolean);
+  let tierGroupIds: Record<number, string> = {};
+  try {
+    const parsed = JSON.parse(tierGroupIdsRaw) as Record<string, string>;
+    tierGroupIds = Object.fromEntries(
+      Object.entries(parsed).map(([k, v]) => [parseInt(k, 10), v])
+    );
+  } catch {
+    console.error(`Invalid --tier-group-ids JSON: ${tierGroupIdsRaw}`);
+    process.exit(1);
+  }
 
   console.log(`\nProcessing roster for ${program} / ${region}`);
   console.log("=".repeat(55));
@@ -279,7 +309,7 @@ async function main() {
     fileId,
     program,
     region,
-    eligibleGroupIds,
+    tierGroupIds,
     policyId:      get("--policy-id"),
     callerAddress: get("--caller-address"),
     archivePath:   get("--archive-path"),

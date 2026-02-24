@@ -5,6 +5,7 @@
   "instruxi": {
     "baseUrl": "https://api.instruxi.io",
     "eligibilityGroupPrefix": "Eligible:",
-    "rwGatewayUrl": "https://gateway.instruxi.io"
+    "rwGatewayUrl": "https://gateway.instruxi.io",
+    "policyId": ""
   }
 }

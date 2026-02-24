@@ -30,7 +30,7 @@ interface IReliefTreasury {
     event EventVerified(bytes32 indexed eventId);
     event EventActivated(bytes32 indexed eventId);
     event EventClosed(bytes32 indexed eventId);
-    event EligibilitySet(bytes32 indexed eventId, address indexed recipient, bool eligible);
+    event TierAmountsUpdated(uint8[] tiers, uint256[] amounts);
     event DisbursementRequested(bytes32 indexed requestId, bytes32 indexed eventId, address indexed recipient);
     event Disbursed(bytes32 indexed eventId, address indexed recipient, uint256 amount);
     event DeliveryConfirmed(bytes32 indexed eventId, address indexed recipient);
@@ -44,7 +44,7 @@ interface IReliefTreasury {
     error EventNotFound(bytes32 eventId);
     error EventNotActive(bytes32 eventId);
     error AlreadyClaimed(bytes32 eventId, address recipient);
-    error NotEligible(bytes32 eventId, address recipient);
+    error TierNotConfigured(uint8 tier);
     error PerEventCapExceeded(uint256 available, uint256 requested);
     error ProgramCapExceeded(uint256 available, uint256 requested);
     error InsufficientTreasuryFunds(uint256 available, uint256 requested);
@@ -70,12 +70,12 @@ interface IReliefTreasury {
     function closeEvent(bytes32 eventId) external;
 
     // ================================================================
-    //                      ELIGIBILITY
+    //                      TIER AMOUNTS
     // ================================================================
 
-    function setEligibility(bytes32 eventId, address recipient, bool eligible) external;
+    function setTierAmounts(uint8[] calldata tiers, uint256[] calldata amounts) external;
 
-    function batchSetEligibility(bytes32 eventId, address[] calldata recipients, bool eligible) external;
+    function getTierAmount(uint8 tier) external view returns (uint256);
 
     // ================================================================
     //                    CLAIM (PULL MODEL)
@@ -116,8 +116,6 @@ interface IReliefTreasury {
     // ================================================================
 
     function getEventRecord(bytes32 eventId) external view returns (EventRecord memory);
-
-    function isEligible(bytes32 eventId, address recipient) external view returns (bool);
 
     function hasClaimed(bytes32 eventId, address recipient) external view returns (bool);
 

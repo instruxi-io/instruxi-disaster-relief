@@ -77,9 +77,23 @@ Admin:             0x<YOUR_ADDRESS>
 
 ---
 
+## Step 2b — Set Tier Amounts
+
+After deploy, configure the USDC payout for each tier (must be done before recipients can claim):
+
+```bash
+npx hardhat set-tier-amounts --network sepolia \
+  --contract 0x<CONTRACT_ADDRESS> \
+  --tiers 1,2 \
+  --amounts 50000000,100000000
+# tier 1 = $50 USDC (standard), tier 2 = $100 USDC (priority)
+```
+
+---
+
 ## Step 3 — Update Workflow Config
 
-Open `workflow/config.staging.json` and replace the placeholder:
+Open `workflow/config.staging.json` and fill in all placeholders:
 
 ```json
 {
@@ -89,10 +103,13 @@ Open `workflow/config.staging.json` and replace the placeholder:
   "instruxi": {
     "baseUrl": "https://api.instruxi.io",
     "eligibilityGroupPrefix": "Eligible:",
-    "rwGatewayUrl": "https://gateway.instruxi.io"
+    "rwGatewayUrl": "https://gateway.instruxi.io",
+    "policyId": "<YOUR_INSTRUXI_POLICY_ID>"
   }
 }
 ```
+
+`policyId` is your Instruxi OPA policy ID for the `claim_disbursement` action. The CRE workflow calls `POST /enforcer/auth/authorize` with this policy before processing any disbursement.
 
 ---
 
@@ -149,16 +166,18 @@ npx hardhat register-event --network sepolia \
 # --ref is a JSON object passed to the CRE workflow. The workflow calls three real
 # public APIs (USGS, GDACS, ReliefWeb) and uses a 2-of-3 consensus rule.
 #
-# Option A — simplest, gets verified=true in almost any real-world condition:
-#   USGS skips (no usgsId), GDACS returns true (active global red alerts), ReliefWeb returns true
+# IMPORTANT: always use a specific usgsId, gdacsId, or region in production.
+# An empty ref may pass verification via unrelated global disaster activity
+# (GDACS returns true for any active red alert worldwide). Only use '{}' for testing.
+#
+# Option A — simplest test, verified=true when any red alert is active globally:
 npx hardhat request-verification --network sepolia \
   --contract 0x<CONTRACT_ADDRESS> \
   --eventid 0xfe3dfcfbd3a3040c4882787cfb0471a41ce91cc9e728b73d68b1b44ae8789477 \
   --ref '{}'
 #
-# Option B — more realistic demo, uses a real USGS earthquake event ID:
-#   Find one at https://earthquake.usgs.gov/earthquakes/search/
-#   e.g. us7000n7c5 is a recent reviewed earthquake
+# Option B — production use, specific USGS earthquake event:
+#   Find event IDs at https://earthquake.usgs.gov/earthquakes/search/
 # npx hardhat request-verification --network sepolia \
 #   --contract 0x<CONTRACT_ADDRESS> \
 #   --eventid 0xfe3dfcfbd3a3040c4882787cfb0471a41ce91cc9e728b73d68b1b44ae8789477 \
@@ -195,6 +214,11 @@ cre workflow simulate disaster-relief-workflow \
 npm run setup-groups -- --program US-FLOOD-2026 --regions "US-CA,US-TX,US-FL"
 ```
 
+This creates groups with tier suffixes:
+- `Eligible:US-FLOOD-2026:US-CA:1` (standard payout)
+- `Eligible:US-FLOOD-2026:US-CA:2` (priority payout)
+- (and similarly for each region)
+
 **Save the group IDs printed** — you need them for roster processing.
 
 ---
@@ -208,12 +232,14 @@ npm run upload-roster -- \
   --program US-FLOOD-2026 \
   --region US-CA
 
-# Process roster: download → validate → onboard → archive
+# Process roster: download → validate → assign tier groups → archive
+# --tier-group-ids maps tier number to Instruxi group ID (from Step 8)
 npm run process-roster -- \
   --file-id <FILE_ID_FROM_UPLOAD> \
   --program US-FLOOD-2026 \
   --region US-CA \
-  --eligible-group-ids <GROUP_IDS_FROM_STEP_8>
+  --tier-group-ids '{"1":"<GROUP_ID_STANDARD>","2":"<GROUP_ID_PRIORITY>"}'
+# "standard" CSV rows → tier 1 group, "priority" CSV rows → tier 2 group
 ```
 
 ---

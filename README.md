@@ -36,7 +36,7 @@ A SaaS disbursement platform for disaster relief charities, built on Instruxi + 
 │   ┌────────────────────────────────────────────────┐                    │
 │   │  registerEvent() → requestEventVerification()  │                    │
 │   │  claimDisbursement() → onReport() → transfer   │                    │
-│   │  Invariants: caps · no-double-pay · eligibility│                    │
+│   │  Invariants: caps · no-double-pay · tier amounts│                    │
 │   └────────────────────────────────────────────────┘                    │
 │          │ RequestSent event              ▲ onReport(metadata, report)  │
 └──────────┼────────────────────────────────┼────────────────────────────┘
@@ -51,11 +51,12 @@ A SaaS disbursement platform for disaster relief charities, built on Instruxi + 
 │  requestType = "event_verification"   requestType = "disbursement"       │
 │         │                                    │                           │
 │         ▼                                    ▼                           │
-│  USGS + GDACS + ReliefWeb         Instruxi Enforcer                      │
-│  (2-of-3 consensus)               GET /admin/groups/account/{addr}/groups│
+│  USGS + GDACS + ReliefWeb         1. POST /enforcer/auth/authorize (OPA) │
+│  (2-of-3 consensus)               2. GET  /admin/groups/.../groups       │
+│         │                            Extract tier from group name suffix  │
 │         │                                    │                           │
 │         └──── onReport(0x01 + encode(requestId, verified)) ────┘         │
-│               onReport(0x02 + encode(requestId, eligible))               │
+│               onReport(0x02 + encode(requestId, allowed, tier))          │
 │                                                                          │
 │         └──── POST /api/webhooks/cre (RWA Gateway) ─────────────────┐   │
 └──────────────────────────────────────────────────────────────────────┼───┘
@@ -89,9 +90,10 @@ Required links per Chainlink hackathon submission rules:
 
 - **Trigger:** EVM Log Trigger on `RequestSent(bytes32 indexed requestId, address indexed requester, string requestType, bytes requestData)`
 - **Callback:** Chainlink Forwarder calls `onReport(bytes metadata, bytes report)` on the contract
-- **Report format:** `report[0]` = prefix byte; `report[1:]` = `abi.encode(bytes32 requestId, bool result)`
-  - `0x01` = event verification result
-  - `0x02` = disbursement eligibility result
+- **Report format:** `report[0]` = prefix byte; `report[1:]` = ABI-encoded payload
+  - `0x01` = event verification: `abi.encode(bytes32 requestId, bool verified)`
+  - `0x02` = disbursement: `abi.encode(bytes32 requestId, bool allowed, uint8 tier)`
+  - `tier` is extracted from the Instruxi Enforcer group name suffix (e.g. `Eligible:US-FLOOD-2026:US-CA:2` → tier 2)
 - **Forwarder address (Sepolia):** `0x15fc6ae953e024d975e77382eeec56a9101f9f88`
 - **After every fulfillment:** `logCallback.ts` calls `POST /api/webhooks/cre` on the RWA Gateway, which auto-creates a TrustSync attestation as a side-effect
 
@@ -137,7 +139,7 @@ instruxi-disaster-relief/
 │   └── relief-tasks.ts             # Hardhat tasks: fund, register-event, etc.
 │
 ├── test/
-│   └── ReliefTreasury.test.ts      # 29 tests — full contract coverage
+│   └── ReliefTreasury.test.ts      # 31 tests — full contract coverage
 │
 ├── rosters/
 │   └── sample-roster.csv           # Example CSV for processRoster.ts
@@ -156,16 +158,20 @@ instruxi-disaster-relief/
 npm run setup-groups -- --program US-FLOOD-2026 --regions "US-CA,US-TX,US-FL"
 ```
 
-Creates `Admins:US-FLOOD-2026`, `Partners:US-FLOOD-2026`, `Eligible:US-FLOOD-2026:US-CA`, etc. in Instruxi Enforcer. Save the returned group IDs.
+Creates `Admins:US-FLOOD-2026`, `Partners:US-FLOOD-2026`, `Eligible:US-FLOOD-2026:US-CA:1`, `Eligible:US-FLOOD-2026:US-CA:2`, etc. in Instruxi Enforcer. The `:1`/`:2` suffix encodes the tier. Save the returned group IDs.
 
-### Phase 2 — Deploy Contract
+### Phase 2 — Deploy Contract + Set Tier Amounts
 
 ```bash
 cp .env.example .env   # fill in values
 npx hardhat deploy --network sepolia
+
+# Set payout amounts for each tier (tier 1 = standard $50, tier 2 = priority $100)
+npx hardhat set-tier-amounts --network sepolia \
+  --contract 0x<TREASURY> --tiers 1,2 --amounts 50000000,100000000
 ```
 
-Update `workflow/config.staging.json` with the deployed `reliefTreasuryAddress`.
+Update `workflow/config.staging.json` with the deployed `reliefTreasuryAddress` and your Instruxi `policyId`.
 
 ### Phase 3 — Fund Treasury + Register Event
 
@@ -195,10 +201,10 @@ npm run upload-roster -- --file rosters/sample-roster.csv \
 npm run process-roster -- \
   --file-id <returned-file-id> \
   --program US-FLOOD-2026 --region US-CA \
-  --eligible-group-ids "groupId1,groupId2"
+  --tier-group-ids '{"1":"groupId_standard","2":"groupId_priority"}'
 ```
 
-`processRoster` runs the full pipeline: presigned URL download → CSV validation → `POST /profile/multi-create` → `POST /admin/groups/account/add-multiple` → archive file.
+`processRoster` runs the full pipeline: presigned URL download → CSV validation → `POST /profile/multi-create` → tier-based `POST /admin/groups/account/add-multiple` (standard tier→`:1` group, priority tier→`:2` group) → archive file.
 
 ### Phase 5 — Activate Event
 
@@ -210,7 +216,11 @@ Only possible after CRE has verified the event (status `Verified`). Admin calls 
 
 ### Phase 6 — Recipient Claims
 
-Recipients call `claimDisbursement(eventId)` via the frontend (Privy SDK wallet → SIWE → Enforcer). This emits `RequestSent("disbursement", ...)` → CRE checks `GET /admin/groups/account/{address}/groups` → if eligible group found, writes `onReport()` → contract transfers USDC.
+Recipients call `claimDisbursement(eventId)` via the frontend (Privy SDK wallet → SIWE → Enforcer). This emits `RequestSent("disbursement", ...)` → CRE:
+1. Calls `POST /enforcer/auth/authorize` (OPA policy) → must return `{ allowed: true }`
+2. Calls `GET /admin/groups/account/{address}/groups` → extracts tier from group name suffix (e.g. `....:2` → tier 2)
+3. Writes `onReport(0x02 + encode(requestId, allowed=true, tier=2))`
+4. Contract resolves `amount = _tierAmounts[2]` and transfers USDC
 
 ### Phase 7 — Attestations (TrustSync)
 
@@ -254,7 +264,8 @@ All scripts use `dotenv/config` — copy `.env.example` to `.env` and fill in va
 | `POST /profile/multi-create` | onboardRecipient, processRoster | Batch create profiles |
 | `POST /admin/groups/create` | setupGroups | Create group hierarchy |
 | `POST /admin/groups/account/add-multiple` | onboardRecipient, processRoster | Assign to eligible groups |
-| `GET /admin/groups/account/{addr}/groups` | logCallback.ts (CRE) | Eligibility check at claim time |
+| `POST /enforcer/auth/authorize` | logCallback.ts (CRE) | OPA policy check at disbursement claim time |
+| `GET /admin/groups/account/{addr}/groups` | logCallback.ts (CRE) | Fetch groups; extract tier from group name suffix |
 | `POST /os/file/upload` | uploadRoster | Upload CSV roster |
 | `POST /os/file/metadata` | uploadRoster | Tag with program/region metadata |
 | `GET /storage/file/presigned-url` | processRoster | Time-limited download URL |
@@ -298,7 +309,8 @@ RWA_GATEWAY_JWT: "<your-gateway-jwt>"
   "instruxi": {
     "baseUrl": "https://api.instruxi.io",
     "eligibilityGroupPrefix": "Eligible:",
-    "rwGatewayUrl": "https://gateway.instruxi.io"
+    "rwGatewayUrl": "https://gateway.instruxi.io",
+    "policyId": "<YOUR_INSTRUXI_POLICY_ID>"
   }
 }
 ```
@@ -336,7 +348,7 @@ npm install
 
 ```bash
 npx hardhat compile          # Compile + generate TypeChain types
-npx hardhat test             # Run 29 tests
+npx hardhat test             # Run 31 tests
 npx hardhat node             # Local Hardhat node
 npx hardhat deploy --network localhost
 npx hardhat deploy --network sepolia
@@ -360,8 +372,8 @@ npx hardhat request-verification --network sepolia \
 npx hardhat activate-event --network sepolia \
   --contract 0x<TREASURY> --eventid 0x...
 
-npx hardhat set-eligibility --network sepolia \
-  --contract 0x<TREASURY> --eventid 0x... --recipient 0x... --eligible true
+npx hardhat set-tier-amounts --network sepolia \
+  --contract 0x<TREASURY> --tiers 1,2 --amounts 50000000,100000000
 
 npx hardhat claim-disbursement --network sepolia \
   --contract 0x<TREASURY> --eventid 0x...
@@ -426,11 +438,11 @@ Enforced by `ReliefTreasury.sol` regardless of what the CRE workflow sends:
 |-----------|-------|
 | Event must be Active | `ev.status == EventStatus.Active` |
 | No double payment | `_claimed[eventId][recipient] == false` |
-| Recipient must be eligible | `_eligibility[eventId][recipient] == true` |
-| Per-recipient cap | `amount <= perRecipientCap` |
+| Tier must be configured | `_tierAmounts[tier] > 0` (else `TierNotConfigured`) |
 | Per-event cap | `ev.totalDisbursed + amount <= ev.perEventCap` |
 | Program cap | `totalDisbursed + amount <= programCap` |
 | Treasury balance | `usdc.balanceOf(address(this)) >= amount` |
+| Tier ceiling | `setTierAmounts` enforces `amount <= perRecipientCap` |
 
 ---
 
@@ -451,9 +463,9 @@ Enforced by `ReliefTreasury.sol` regardless of what the CRE workflow sends:
 |----------------------------------|----------------------------------|
 | USDC treasury balance | Recipient identity (Enforcer profiles) |
 | Event verification fulfillment tx | Roster CSV (encrypted Object Storage) |
-| Disbursement transactions | Group memberships (Enforcer) |
+| Disbursement transactions | Group memberships + tier assignment (Enforcer) |
 | TrustSync attestations + batch proofs | Policy decisions (OPA Rego) |
-| Wallet → eligible mapping (per event) | Phone/email → wallet mapping (Privy) |
+| Tier amounts (`_tierAmounts[1] = $50`, etc.) | Phone/email → wallet mapping (Privy) |
 
 ---
 

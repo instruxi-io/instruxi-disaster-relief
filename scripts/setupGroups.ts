@@ -3,10 +3,14 @@
  *
  * Creates the Enforcer group hierarchy for a relief program.
  *
- * Group naming convention (from playbook):
+ * Group naming convention:
  *   Admins:ProgramX
  *   Partners:ProgramX
- *   Eligible:ProgramX:RegionY   (one per region)
+ *   Eligible:ProgramX:RegionY:1   (tier 1 = standard payout)
+ *   Eligible:ProgramX:RegionY:2   (tier 2 = priority payout)
+ *
+ * The tier suffix is parsed by the CRE workflow to determine payout amount.
+ * Admin must call setTierAmounts([1,2],[...]) on the contract after deploy.
  *
  * Usage:
  *   npx ts-node scripts/setupGroups.ts \
@@ -35,10 +39,14 @@ async function setupGroups(
   const groupNames = [
     `Admins:${program}`,
     `Partners:${program}`,
-    ...regions.map((r) => `Eligible:${program}:${r}`),
+    ...regions.flatMap((r) => [
+      `Eligible:${program}:${r}:1`,   // tier 1 = standard payout
+      `Eligible:${program}:${r}:2`,   // tier 2 = priority payout
+    ]),
   ];
 
   console.log(`\nSetting up ${groupNames.length} groups for program "${program}":`);
+  console.log(`  (Eligible groups include tier suffix: :1 = standard, :2 = priority)`);
   groupNames.forEach((n) => console.log(`  - ${n}`));
   console.log();
 
@@ -62,6 +70,8 @@ async function setupGroups(
   }
 
   console.log(`\nDone. ${result.groups.length} groups ready, ${result.errors.length} errors.`);
+  console.log(`\nNext: call setTierAmounts([1,2],[50000000,100000000]) on the contract,`);
+  console.log(`then use group IDs below when running process-roster with --tier-group-ids.`);
   return result;
 }
 

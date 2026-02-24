@@ -5,7 +5,7 @@
  * appropriate handler based on requestType:
  *
  *   "event_verification" → queryDisasterAPIs() → onReport(0x01 + payload)
- *   "disbursement"       → checkEnforcerEligibility() → onReport(0x02 + payload)
+ *   "disbursement"       → OPA authorize + tier extraction → onReport(0x02 + payload)
  *
  * Simulation:
  *   cre workflow simulate disaster-relief-workflow \
@@ -30,6 +30,7 @@ export type WorkflowConfig = {
     baseUrl: string;
     eligibilityGroupPrefix: string;
     rwGatewayUrl: string;   // RWA Gateway base URL for CRE webhook notifications
+    policyId: string;       // OPA policy ID for disbursement authorization
   };
 };
 

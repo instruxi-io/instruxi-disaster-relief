@@ -13,9 +13,9 @@
  *
  *   "disbursement":
  *     1. Decode eventId and recipient address from requestData
- *     2. Query Instruxi Enforcer: GET /admin/groups/account/{address}/groups
- *     3. Check for eligibility group prefix match
- *     4. Write result via onReport(metadata, 0x02 + abi.encode(requestId, eligible))
+ *     2. POST /enforcer/auth/authorize (OPA policy check) → { allowed: boolean }
+ *     3. GET  /admin/groups/account/{addr}/groups → extract tier from group name suffix
+ *     4. Write result via onReport(metadata, 0x02 + abi.encode(requestId, allowed, tier))
  */
 
 import {
@@ -44,9 +44,10 @@ const REQUEST_SENT_ABI = parseAbi([
 
 // ── Typed abi parameter schemas ───────────────────────────────────────────
 
-const EVENT_VERIFICATION_PARAMS = parseAbiParameters("bytes32 eventId, string externalRef");
-const DISBURSEMENT_PARAMS        = parseAbiParameters("bytes32 eventId, address recipient");
-const REPORT_PARAMS              = parseAbiParameters("bytes32, bool");
+const EVENT_VERIFICATION_PARAMS  = parseAbiParameters("bytes32 eventId, string externalRef");
+const DISBURSEMENT_PARAMS         = parseAbiParameters("bytes32 eventId, address recipient");
+const EVENT_VERIFICATION_REPORT_PARAMS = parseAbiParameters("bytes32, bool");
+const DISBURSEMENT_REPORT_PARAMS       = parseAbiParameters("bytes32, bool, uint8");
 
 // ── Report prefix bytes (must match ReliefTreasury Solidity constants) ────
 const PREFIX_EVENT_VERIFICATION = "01" as const;
@@ -64,13 +65,23 @@ interface ExternalRef {
 
 // ── Report encoding ───────────────────────────────────────────────────────
 
-function encodeReport(
-  prefix: typeof PREFIX_EVENT_VERIFICATION | typeof PREFIX_DISBURSEMENT,
+/** Encode an event verification report: prefix 0x01 + abi.encode(requestId, verified) */
+function encodeEventVerificationReport(
   requestId: `0x${string}`,
-  result: boolean
+  verified: boolean
 ): `0x${string}` {
-  const payload = encodeAbiParameters(REPORT_PARAMS, [requestId, result]);
-  return `0x${prefix}${payload.slice(2)}` as `0x${string}`;
+  const payload = encodeAbiParameters(EVENT_VERIFICATION_REPORT_PARAMS, [requestId, verified]);
+  return `0x${PREFIX_EVENT_VERIFICATION}${payload.slice(2)}` as `0x${string}`;
+}
+
+/** Encode a disbursement report: prefix 0x02 + abi.encode(requestId, allowed, tier) */
+function encodeDisbursementReport(
+  requestId: `0x${string}`,
+  allowed: boolean,
+  tier: number
+): `0x${string}` {
+  const payload = encodeAbiParameters(DISBURSEMENT_REPORT_PARAMS, [requestId, allowed, tier]);
+  return `0x${PREFIX_DISBURSEMENT}${payload.slice(2)}` as `0x${string}`;
 }
 
 // ── External data source checks ───────────────────────────────────────────
@@ -184,41 +195,77 @@ function applyConsensus(
   return votes >= 2;
 }
 
-// ── Instruxi Enforcer eligibility check ──────────────────────────────────
+// ── OPA + Instruxi Enforcer eligibility + tier check ─────────────────────
 
-function checkEnforcerEligibility(
+/**
+ * Step 1: OPA policy authorizes the claim action.
+ * Step 2: Fetch Instruxi Enforcer groups; extract tier from group name suffix
+ *         (e.g. "Eligible:US-FLOOD-2026:US-CA:2" → tier 2).
+ *
+ * Returns { allowed: false, tier: 0 } for any failure mode so the contract
+ * receives a clean denial without reverting the CRE workflow.
+ */
+function checkEligibilityAndTier(
   runtime: Runtime<WorkflowConfig>,
   recipient: string
-): boolean {
-  const { baseUrl, eligibilityGroupPrefix } = runtime.config.instruxi;
+): { allowed: boolean; tier: number } {
+  const { baseUrl, policyId, eligibilityGroupPrefix } = runtime.config.instruxi;
+  const http = new cre.capabilities.HTTPCapability();
+
+  // Step 1: OPA policy check
+  runtime.log(`[Enforcer] OPA authorize: ${recipient}`);
+  try {
+    const authRes = http.request(runtime, {
+      method: "POST",
+      url: `${baseUrl}/enforcer/auth/authorize`,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        policy_id: policyId,
+        input: { action: "claim_disbursement", recipient },
+      }),
+    }).result();
+    const authBody = JSON.parse(authRes.body) as { allowed: boolean };
+    if (!authBody.allowed) {
+      runtime.log(`[Enforcer] OPA denied: ${recipient}`);
+      return { allowed: false, tier: 0 };
+    }
+  } catch (err) {
+    runtime.log(`[Enforcer] OPA error: ${err instanceof Error ? err.message : String(err)}`);
+    return { allowed: false, tier: 0 };
+  }
+
+  // Step 2: Fetch groups and extract tier from group name suffix
   const url = `${baseUrl}/admin/groups/account/${recipient}/groups`;
   runtime.log(`[Enforcer] GET ${url}`);
-
   try {
-    const http = new cre.capabilities.HTTPCapability();
-    const res  = http.request(runtime, {
+    const groupsRes = http.request(runtime, {
       method: "GET",
       url,
-      headers: {
-        Accept: "application/json",
-        // API key injected from secrets.yaml at CRE runtime via environment
-      },
+      headers: { Accept: "application/json" },
     }).result();
-
-    const body = JSON.parse(res.body) as { success?: boolean; data?: string[] };
-    if (!body.success || !Array.isArray(body.data)) {
-      runtime.log("[Enforcer] Unexpected response format → ineligible");
-      return false;
+    const groupsBody = JSON.parse(groupsRes.body) as { success?: boolean; data?: string[] };
+    if (!groupsBody.success || !Array.isArray(groupsBody.data)) {
+      runtime.log("[Enforcer] Could not fetch groups");
+      return { allowed: false, tier: 0 };
     }
 
-    const eligible = body.data.some((g) => g.startsWith(eligibilityGroupPrefix));
-    runtime.log(
-      `[Enforcer] ${body.data.length} group(s). Prefix "${eligibilityGroupPrefix}" match: ${eligible}`
-    );
-    return eligible;
+    const eligibleGroup = groupsBody.data.find((g) => g.startsWith(eligibilityGroupPrefix));
+    if (!eligibleGroup) {
+      runtime.log(`[Enforcer] No group matching prefix "${eligibilityGroupPrefix}"`);
+      return { allowed: false, tier: 0 };
+    }
+
+    const tier = parseInt(eligibleGroup.split(":").pop() ?? "0", 10);
+    if (!tier) {
+      runtime.log(`[Enforcer] Could not parse tier from: ${eligibleGroup}`);
+      return { allowed: false, tier: 0 };
+    }
+
+    runtime.log(`[Enforcer] Allowed, tier=${tier} (${eligibleGroup})`);
+    return { allowed: true, tier };
   } catch (err) {
-    runtime.log(`[Enforcer] Error: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
+    runtime.log(`[Enforcer] Group fetch error: ${err instanceof Error ? err.message : String(err)}`);
+    return { allowed: false, tier: 0 };
   }
 }
 
@@ -306,6 +353,10 @@ function handleEventVerification(
 ): string {
   runtime.log("── Event Verification ──────────────────────────────────");
 
+  // IMPORTANT — production use: always populate externalRef with a specific usgsId,
+  // gdacsId, or region. An empty ref may pass verification via unrelated global
+  // disaster activity (GDACS returns true for any active red alert worldwide).
+  // Empty ref is only appropriate for local testing.
   let externalRef: ExternalRef = {};
 
   try {
@@ -323,7 +374,7 @@ function handleEventVerification(
   const verified  = applyConsensus(runtime, { usgs, gdacs, reliefweb });
 
   runtime.log(`[Result] verified=${verified}`);
-  const report  = encodeReport(PREFIX_EVENT_VERIFICATION, requestId, verified);
+  const report  = encodeEventVerificationReport(requestId, verified);
   const txHash  = writeReport(runtime, report);
   runtime.log(`[Write] ✓ tx=${txHash}`);
 
@@ -347,7 +398,7 @@ function handleDisbursement(
   requestId: `0x${string}`,
   requestData: `0x${string}`
 ): string {
-  runtime.log("── Disbursement Eligibility Check ──────────────────────");
+  runtime.log("── Disbursement OPA + Tier Check ───────────────────────");
 
   let recipient = "";
 
@@ -357,15 +408,15 @@ function handleDisbursement(
     runtime.log(`[Step 2] recipient: ${recipient}`);
   } catch (err) {
     runtime.log(`[Step 2] Decode error: ${err}`);
-    const report = encodeReport(PREFIX_DISBURSEMENT, requestId, false);
+    const report = encodeDisbursementReport(requestId, false, 0);
     const txHash = writeReport(runtime, report);
     return `Disbursement: decode error tx=${txHash}`;
   }
 
-  const eligible = checkEnforcerEligibility(runtime, recipient);
-  runtime.log(`[Result] eligible=${eligible}`);
+  const { allowed, tier } = checkEligibilityAndTier(runtime, recipient);
+  runtime.log(`[Result] allowed=${allowed} tier=${tier}`);
 
-  const report = encodeReport(PREFIX_DISBURSEMENT, requestId, eligible);
+  const report = encodeDisbursementReport(requestId, allowed, tier);
   const txHash = writeReport(runtime, report);
   runtime.log(`[Write] ✓ tx=${txHash}`);
 
@@ -375,12 +426,12 @@ function handleDisbursement(
     requestId,
     requestType: "disbursement",
     txHash,
-    result: eligible,
+    result: allowed,
     eventId:   disbEventId as string,
     recipient,
   });
 
-  return `Disbursement: eligible=${eligible} tx=${txHash}`;
+  return `Disbursement: allowed=${allowed} tier=${tier} tx=${txHash}`;
 }
 
 // ── Main log trigger callback ─────────────────────────────────────────────

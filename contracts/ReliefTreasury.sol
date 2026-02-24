@@ -23,21 +23,20 @@ import {IReliefTreasury} from "./interfaces/IReliefTreasury.sol";
  * Two CRE request types:
  *   1. "event_verification" — CRE queries USGS/GDACS/ReliefWeb (2-of-3 rule) and
  *      calls back with verified=true/false.
- *   2. "disbursement" — Recipient pulls funds; CRE validates Instruxi Enforcer group
- *      membership and calls back with eligible=true/false.
+ *   2. "disbursement" — Recipient pulls funds; CRE validates via OPA policy and
+ *      Instruxi Enforcer group membership, then calls back with (allowed, tier).
  *
  * Enforced invariants (all onchain, cannot be bypassed):
  *   - No payout unless event is Active (verified by CRE fulfiller)
- *   - No payout above perRecipientCap
+ *   - No payout for an unconfigured tier (TierNotConfigured)
  *   - No payout above per-event cap
  *   - No payout above program cap
  *   - No double payment per event per recipient
- *   - Recipient must be in onchain eligibility mapping (set by CRE after roster processing)
  *   - Only authorized fulfillers can fulfill requests
  *
  * CRE Report Encoding (prefix byte routes the report):
  *   0x01 = event_verification result: abi.encode(bytes32 requestId, bool verified)
- *   0x02 = disbursement result:       abi.encode(bytes32 requestId, bool eligible)
+ *   0x02 = disbursement result:       abi.encode(bytes32 requestId, bool allowed, uint8 tier)
  */
 contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -71,7 +70,8 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     /// @notice The USDC token held and disbursed by this treasury
     IERC20 public immutable usdc;
 
-    /// @notice Maximum USDC disbursed per recipient per event (6 decimals)
+    /// @notice Maximum USDC disbursed per recipient per event (6 decimals, e.g. 100e6 = $100)
+    /// @dev Serves as a ceiling for tier amounts set via setTierAmounts
     uint256 public immutable perRecipientCap;
 
     /// @notice Maximum total USDC disbursable across the entire program (6 decimals)
@@ -93,8 +93,8 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     /// @notice Per-event records: status, caps, disbursement totals
     mapping(bytes32 => EventRecord) private _events;
 
-    /// @notice eventId => wallet => eligible (set by CRE after roster processing)
-    mapping(bytes32 => mapping(address => bool)) private _eligibility;
+    /// @notice tier number => USDC amount (6 decimals); set by admin via setTierAmounts
+    mapping(uint8 => uint256) private _tierAmounts;
 
     /// @notice eventId => wallet => claimed (double-payment guard)
     mapping(bytes32 => mapping(address => bool)) private _claimed;
@@ -123,7 +123,8 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     /**
      * @param _usdc           USDC token address
-     * @param _perRecipientCap Max USDC per recipient per event (6 decimals, e.g. 50e6 = $50)
+     * @param _perRecipientCap Max USDC per recipient per event (6 decimals, e.g. 100e6 = $100)
+     *                         Acts as ceiling for tier amounts; actual payout = _tierAmounts[tier]
      * @param _programCap     Max total USDC for the entire program
      * @param admin           Address granted DEFAULT_ADMIN_ROLE, DEPOSITOR_ROLE, PAUSER_ROLE
      */
@@ -231,36 +232,36 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     }
 
     // ================================================================
-    //                        ELIGIBILITY
+    //                        TIER AMOUNTS
     // ================================================================
 
     /**
-     * @notice CRE fulfiller sets a single recipient's eligibility for an event.
+     * @notice Set USDC payout amounts for each disbursement tier.
+     * @dev Each amount must not exceed perRecipientCap. CRE extracts the tier
+     *      from the recipient's Instruxi Enforcer group name suffix and passes
+     *      it back via onReport(). The contract resolves amount = _tierAmounts[tier].
+     * @param tiers   Array of tier numbers (e.g. [1, 2])
+     * @param amounts Array of USDC amounts in 6-decimal units (e.g. [50000000, 100000000])
      */
-    function setEligibility(bytes32 eventId, address recipient, bool eligible) external {
-        if (!authorizedFulfillers[msg.sender]) revert UnauthorizedFulfiller();
-        if (_events[eventId].status == EventStatus.Unregistered) revert EventNotFound(eventId);
-        _eligibility[eventId][recipient] = eligible;
-        emit EligibilitySet(eventId, recipient, eligible);
+    function setTierAmounts(
+        uint8[] calldata tiers,
+        uint256[] calldata amounts
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(tiers.length == amounts.length, "length mismatch");
+        for (uint256 i = 0; i < tiers.length; ) {
+            require(amounts[i] <= perRecipientCap, "exceeds perRecipientCap");
+            _tierAmounts[tiers[i]] = amounts[i];
+            unchecked { ++i; }
+        }
+        emit TierAmountsUpdated(tiers, amounts);
     }
 
     /**
-     * @notice CRE fulfiller batch-sets eligibility after processing a recipient roster.
-     * @dev Called after Instruxi Enforcer group membership is validated offchain.
+     * @notice Returns the configured USDC payout amount for a given tier.
+     * @param tier Tier number (1 = standard, 2 = priority, etc.)
      */
-    function batchSetEligibility(
-        bytes32 eventId,
-        address[] calldata recipients,
-        bool eligible
-    ) external {
-        if (!authorizedFulfillers[msg.sender]) revert UnauthorizedFulfiller();
-        if (_events[eventId].status == EventStatus.Unregistered) revert EventNotFound(eventId);
-        uint256 len = recipients.length;
-        for (uint256 i = 0; i < len; ) {
-            _eligibility[eventId][recipients[i]] = eligible;
-            emit EligibilitySet(eventId, recipients[i], eligible);
-            unchecked { ++i; }
-        }
+    function getTierAmount(uint8 tier) external view returns (uint256) {
+        return _tierAmounts[tier];
     }
 
     // ================================================================
@@ -269,8 +270,9 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     /**
      * @notice Recipient submits a disbursement claim.
-     * @dev Emits RequestSent; CRE validates Enforcer group membership then
-     *      calls back via onReport() or fulfillRequest() to execute the transfer.
+     * @dev Emits RequestSent; CRE validates via OPA policy + Instruxi Enforcer group
+     *      membership, extracts tier from group name suffix, then calls back via
+     *      onReport() with (allowed, tier) to execute the transfer.
      * @param eventId  The active disaster event to claim against
      * @return requestId CRE request identifier
      */
@@ -305,7 +307,8 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
      * @dev The Chainlink Forwarder address must be in authorizedFulfillers.
      *      Report encoding:
      *        report[0]  = prefix byte (0x01 = event_verification, 0x02 = disbursement)
-     *        report[1:] = abi.encode(bytes32 requestId, bool result)
+     *        report[1:] = abi.encode(bytes32 requestId, bool result)          [0x01]
+     *                   = abi.encode(bytes32 requestId, bool allowed, uint8 tier) [0x02]
      * @param metadata  CRE workflow metadata (workflowId, workflowName, workflowOwner)
      * @param report    Encoded report payload
      */
@@ -318,7 +321,9 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     /**
      * @notice Direct fulfillment entry point — used for testing and non-Forwarder fulfillers.
-     * @dev Fulfiller must be in authorizedFulfillers. responseData = abi.encode(bool result).
+     * @dev Fulfiller must be in authorizedFulfillers.
+     *      For disbursements: responseData = abi.encode(bool allowed, uint8 tier).
+     *      For event verification: responseData = abi.encode(bool verified).
      */
     function fulfillRequest(bytes32 requestId, bytes calldata responseData) external nonReentrant {
         if (!authorizedFulfillers[msg.sender]) revert UnauthorizedFulfiller();
@@ -379,7 +384,7 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     /**
      * @notice Decode and route an incoming CRE report.
-     * @dev report[0] is the prefix byte; report[1:] is abi.encode(requestId, result).
+     * @dev report[0] is the prefix byte; report[1:] is the abi-encoded payload.
      */
     function _processReport(bytes calldata report) internal {
         require(report.length > 1, "ReliefTreasury: empty report");
@@ -391,8 +396,8 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
             bytes memory responseData = abi.encode(verified);
             _validateAndFulfillRequest(requestId, msg.sender, responseData);
         } else if (prefix == _REPORT_DISBURSEMENT) {
-            (bytes32 requestId, bool eligible) = abi.decode(payload, (bytes32, bool));
-            bytes memory responseData = abi.encode(eligible);
+            (bytes32 requestId, bool allowed, uint8 tier) = abi.decode(payload, (bytes32, bool, uint8));
+            bytes memory responseData = abi.encode(allowed, tier);
             _validateAndFulfillRequest(requestId, msg.sender, responseData);
         }
         // Unknown prefix: no-op (forward-compatible)
@@ -440,8 +445,8 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     }
 
     function _handleDisbursement(bytes32 requestId, bytes memory responseData) private {
-        (bool eligible) = abi.decode(responseData, (bool));
-        if (!eligible) return; // CRE confirmed ineligible — no transfer
+        (bool allowed, uint8 tier) = abi.decode(responseData, (bool, uint8));
+        if (!allowed) return; // OPA denied — no transfer
 
         DisbursementRequest storage req = _disbursementRequests[requestId];
         bytes32 eventId = req.eventId;
@@ -452,9 +457,10 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
         // ── Onchain invariants — enforced regardless of CRE response ──
         if (ev.status != EventStatus.Active) return;
         if (_claimed[eventId][recipient]) return;
-        if (!_eligibility[eventId][recipient]) revert NotEligible(eventId, recipient);
 
-        uint256 amount = perRecipientCap;
+        uint256 amount = _tierAmounts[tier];
+        if (amount == 0) revert TierNotConfigured(tier);
+
         uint256 evAvail   = ev.perEventCap - ev.totalDisbursed;
         uint256 progAvail = programCap - totalDisbursed;
         uint256 balance   = usdc.balanceOf(address(this));
@@ -479,10 +485,6 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     function getEventRecord(bytes32 eventId) external view returns (EventRecord memory) {
         return _events[eventId];
-    }
-
-    function isEligible(bytes32 eventId, address recipient) external view returns (bool) {
-        return _eligibility[eventId][recipient];
     }
 
     function hasClaimed(bytes32 eventId, address recipient) external view returns (bool) {
