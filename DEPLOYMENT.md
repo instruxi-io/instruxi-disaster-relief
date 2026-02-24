@@ -145,10 +145,24 @@ npx hardhat register-event --network sepolia \
   --cap 5000000000
 
 # Request verification — this emits RequestSent (SAVE THIS TX HASH)
+#
+# --ref is a JSON object passed to the CRE workflow. The workflow calls three real
+# public APIs (USGS, GDACS, ReliefWeb) and uses a 2-of-3 consensus rule.
+#
+# Option A — simplest, gets verified=true in almost any real-world condition:
+#   USGS skips (no usgsId), GDACS returns true (active global red alerts), ReliefWeb returns true
 npx hardhat request-verification --network sepolia \
   --contract 0x<CONTRACT_ADDRESS> \
   --eventid 0xfe3dfcfbd3a3040c4882787cfb0471a41ce91cc9e728b73d68b1b44ae8789477 \
-  --ref '{"usgsId":"us7000abc","region":"US","minMagnitude":5.0}'
+  --ref '{}'
+#
+# Option B — more realistic demo, uses a real USGS earthquake event ID:
+#   Find one at https://earthquake.usgs.gov/earthquakes/search/
+#   e.g. us7000n7c5 is a recent reviewed earthquake
+# npx hardhat request-verification --network sepolia \
+#   --contract 0x<CONTRACT_ADDRESS> \
+#   --eventid 0xfe3dfcfbd3a3040c4882787cfb0471a41ce91cc9e728b73d68b1b44ae8789477 \
+#   --ref '{"usgsId":"us7000n7c5","region":"US","minMagnitude":4.5}'
 ```
 
 The second command prints the tx hash. **Save it — it goes into the CRE simulation.**
