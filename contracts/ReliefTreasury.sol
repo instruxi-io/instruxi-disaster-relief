@@ -26,8 +26,19 @@ import {IReliefTreasury} from "./interfaces/IReliefTreasury.sol";
  *   2. "disbursement" — Recipient pulls funds; CRE validates via OPA policy and
  *      Instruxi Enforcer group membership, then calls back with (allowed, tier).
  *
+ * Governance model:
+ *   - DEFAULT_ADMIN_ROLE should be held by the funding organization (charity/NGO),
+ *     not the platform operator. The deployer should transfer this role immediately
+ *     after deploy in production.
+ *   - Tier amounts are committed at event registration time and cannot be changed.
+ *     This is the onchain transparency guarantee: the funding org locks in what
+ *     each tier pays before any roster is processed or any claim is made.
+ *   - Roster hash anchoring (anchorRoster) provides auditability for offchain
+ *     tier assignments: anyone can hash the original CSV and verify it matches
+ *     the onchain RosterAnchored event.
+ *
  * Enforced invariants (all onchain, cannot be bypassed):
- *   - No payout unless event is Active (verified by CRE fulfiller)
+ *   - No payout unless event is Active (verified by CRE)
  *   - No payout for an unconfigured tier (TierNotConfigured)
  *   - No payout above per-event cap
  *   - No payout above program cap
@@ -70,8 +81,8 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     /// @notice The USDC token held and disbursed by this treasury
     IERC20 public immutable usdc;
 
-    /// @notice Maximum USDC disbursed per recipient per event (6 decimals, e.g. 100e6 = $100)
-    /// @dev Serves as a ceiling for tier amounts set via setTierAmounts
+    /// @notice Hard ceiling for any single disbursement (6 decimals).
+    ///         Enforced at event registration: no tier amount may exceed this value.
     uint256 public immutable perRecipientCap;
 
     /// @notice Maximum total USDC disbursable across the entire program (6 decimals)
@@ -93,8 +104,8 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     /// @notice Per-event records: status, caps, disbursement totals
     mapping(bytes32 => EventRecord) private _events;
 
-    /// @notice tier number => USDC amount (6 decimals); set by admin via setTierAmounts
-    mapping(uint8 => uint256) private _tierAmounts;
+    /// @notice eventId => tier => USDC amount (locked at event registration, immutable thereafter)
+    mapping(bytes32 => mapping(uint8 => uint256)) private _eventTierAmounts;
 
     /// @notice eventId => wallet => claimed (double-payment guard)
     mapping(bytes32 => mapping(address => bool)) private _claimed;
@@ -123,10 +134,12 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     /**
      * @param _usdc           USDC token address
-     * @param _perRecipientCap Max USDC per recipient per event (6 decimals, e.g. 100e6 = $100)
-     *                         Acts as ceiling for tier amounts; actual payout = _tierAmounts[tier]
+     * @param _perRecipientCap Hard ceiling per disbursement (6 decimals, e.g. 100e6 = $100).
+     *                         No event tier amount may exceed this value.
      * @param _programCap     Max total USDC for the entire program
-     * @param admin           Address granted DEFAULT_ADMIN_ROLE, DEPOSITOR_ROLE, PAUSER_ROLE
+     * @param admin           Address granted DEFAULT_ADMIN_ROLE, DEPOSITOR_ROLE, PAUSER_ROLE.
+     *                        In production this should be the funding organization's wallet,
+     *                        not the platform operator.
      */
     constructor(
         address _usdc,
@@ -172,19 +185,39 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     // ================================================================
 
     /**
-     * @notice Register a new disaster event.
-     * @param eventId     Unique identifier (e.g. keccak256 of program+region+date)
-     * @param perEventCap Maximum USDC disbursable for this event
+     * @notice Register a disaster event and commit to per-tier payout amounts atomically.
+     * @dev Tier amounts are locked at registration and cannot be modified after the fact.
+     *      This is the funding organization's onchain commitment: anyone can verify
+     *      what was promised by reading the EventRegistered event.
+     * @param eventId    Unique identifier (e.g. keccak256 of program+region+date)
+     * @param perEventCap Total USDC budget for this event
+     * @param tiers      Tier numbers (e.g. [1, 2])
+     * @param amounts    USDC amounts per tier in 6-decimal units (e.g. [50000000, 100000000])
      */
-    function registerEvent(bytes32 eventId, uint256 perEventCap) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function registerEvent(
+        bytes32 eventId,
+        uint256 perEventCap,
+        uint8[] calldata tiers,
+        uint256[] calldata amounts
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (_events[eventId].status != EventStatus.Unregistered) revert EventAlreadyRegistered(eventId);
         require(perEventCap > 0, "ReliefTreasury: zero perEventCap");
+        require(tiers.length > 0 && tiers.length == amounts.length, "ReliefTreasury: tiers required");
+
         _events[eventId] = EventRecord({
             status: EventStatus.Pending,
             perEventCap: perEventCap,
             totalDisbursed: 0
         });
-        emit EventRegistered(eventId, perEventCap);
+
+        for (uint256 i = 0; i < tiers.length; ) {
+            require(amounts[i] > 0, "ReliefTreasury: zero tier amount");
+            require(amounts[i] <= perRecipientCap, "ReliefTreasury: tier amount exceeds perRecipientCap");
+            _eventTierAmounts[eventId][tiers[i]] = amounts[i];
+            unchecked { ++i; }
+        }
+
+        emit EventRegistered(eventId, perEventCap, tiers, amounts);
     }
 
     /**
@@ -232,36 +265,27 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     }
 
     // ================================================================
-    //                        TIER AMOUNTS
+    //                    ROSTER TRANSPARENCY
     // ================================================================
 
     /**
-     * @notice Set USDC payout amounts for each disbursement tier.
-     * @dev Each amount must not exceed perRecipientCap. CRE extracts the tier
-     *      from the recipient's Instruxi Enforcer group name suffix and passes
-     *      it back via onReport(). The contract resolves amount = _tierAmounts[tier].
-     * @param tiers   Array of tier numbers (e.g. [1, 2])
-     * @param amounts Array of USDC amounts in 6-decimal units (e.g. [50000000, 100000000])
+     * @notice Anchor a processed roster's SHA-256 hash onchain for public auditability.
+     * @dev The RosterAnchored event is the transparency hook for offchain tier assignments.
+     *      Partners assign tiers via CSV — this event lets anyone verify which CSV was
+     *      processed by hashing it and comparing to rosterHash.
+     * @param rosterHash  SHA-256 of the raw CSV bytes (as bytes32)
+     * @param eventId     The event this roster was processed against
+     * @param program     Program name (e.g. "US-FLOOD-2026")
+     * @param region      Region code (e.g. "US-CA")
      */
-    function setTierAmounts(
-        uint8[] calldata tiers,
-        uint256[] calldata amounts
+    function anchorRoster(
+        bytes32 rosterHash,
+        bytes32 eventId,
+        string calldata program,
+        string calldata region
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(tiers.length == amounts.length, "length mismatch");
-        for (uint256 i = 0; i < tiers.length; ) {
-            require(amounts[i] <= perRecipientCap, "exceeds perRecipientCap");
-            _tierAmounts[tiers[i]] = amounts[i];
-            unchecked { ++i; }
-        }
-        emit TierAmountsUpdated(tiers, amounts);
-    }
-
-    /**
-     * @notice Returns the configured USDC payout amount for a given tier.
-     * @param tier Tier number (1 = standard, 2 = priority, etc.)
-     */
-    function getTierAmount(uint8 tier) external view returns (uint256) {
-        return _tierAmounts[tier];
+        if (_events[eventId].status == EventStatus.Unregistered) revert EventNotFound(eventId);
+        emit RosterAnchored(rosterHash, eventId, program, region);
     }
 
     // ================================================================
@@ -307,22 +331,20 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
      * @dev The Chainlink Forwarder address must be in authorizedFulfillers.
      *      Report encoding:
      *        report[0]  = prefix byte (0x01 = event_verification, 0x02 = disbursement)
-     *        report[1:] = abi.encode(bytes32 requestId, bool result)          [0x01]
+     *        report[1:] = abi.encode(bytes32 requestId, bool result)              [0x01]
      *                   = abi.encode(bytes32 requestId, bool allowed, uint8 tier) [0x02]
      * @param metadata  CRE workflow metadata (workflowId, workflowName, workflowOwner)
      * @param report    Encoded report payload
      */
     function onReport(bytes calldata metadata, bytes calldata report) external nonReentrant {
         if (!authorizedFulfillers[msg.sender]) revert UnauthorizedFulfiller();
-        // metadata available for optional workflow identity checks (not enforced for MVP)
         (metadata); // silence unused warning
         _processReport(report);
     }
 
     /**
      * @notice Direct fulfillment entry point — used for testing and non-Forwarder fulfillers.
-     * @dev Fulfiller must be in authorizedFulfillers.
-     *      For disbursements: responseData = abi.encode(bool allowed, uint8 tier).
+     * @dev For disbursements: responseData = abi.encode(bool allowed, uint8 tier).
      *      For event verification: responseData = abi.encode(bool verified).
      */
     function fulfillRequest(bytes32 requestId, bytes calldata responseData) external nonReentrant {
@@ -382,10 +404,6 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     //                    INTERNAL: CRE REPORT PROCESSING
     // ================================================================
 
-    /**
-     * @notice Decode and route an incoming CRE report.
-     * @dev report[0] is the prefix byte; report[1:] is the abi-encoded payload.
-     */
     function _processReport(bytes calldata report) internal {
         require(report.length > 1, "ReliefTreasury: empty report");
         uint8 prefix = uint8(report[0]);
@@ -407,12 +425,9 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     //                    INTERNAL: ChainlinkCREClient HOOKS
     // ================================================================
 
-    /**
-     * @notice Dispatch fulfilled request to the correct handler based on stored type.
-     */
     function _fulfillRequest(
         bytes32 requestId,
-        address, /* requester — enforced by onchain state, not CRE response */
+        address,
         bytes memory responseData
     ) internal override {
         bytes32 typeHash = keccak256(bytes(_requestTypes[requestId]));
@@ -441,12 +456,11 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
             ev.status = EventStatus.Verified;
             emit EventVerified(eventId);
         }
-        // If not verified: event stays Pending; admin may retry with updated externalRef
     }
 
     function _handleDisbursement(bytes32 requestId, bytes memory responseData) private {
         (bool allowed, uint8 tier) = abi.decode(responseData, (bool, uint8));
-        if (!allowed) return; // OPA denied — no transfer
+        if (!allowed) return;
 
         DisbursementRequest storage req = _disbursementRequests[requestId];
         bytes32 eventId = req.eventId;
@@ -454,11 +468,10 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
         EventRecord storage ev = _events[eventId];
 
-        // ── Onchain invariants — enforced regardless of CRE response ──
         if (ev.status != EventStatus.Active) return;
         if (_claimed[eventId][recipient]) return;
 
-        uint256 amount = _tierAmounts[tier];
+        uint256 amount = _eventTierAmounts[eventId][tier];
         if (amount == 0) revert TierNotConfigured(tier);
 
         uint256 evAvail   = ev.perEventCap - ev.totalDisbursed;
@@ -469,7 +482,6 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
         if (amount > progAvail) revert ProgramCapExceeded(progAvail, amount);
         if (amount > balance)   revert InsufficientTreasuryFunds(balance, amount);
 
-        // ── State before transfer (reentrancy — also guarded by nonReentrant on callers) ──
         _claimed[eventId][recipient]  = true;
         ev.totalDisbursed            += amount;
         totalDisbursed               += amount;
@@ -485,6 +497,10 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     function getEventRecord(bytes32 eventId) external view returns (EventRecord memory) {
         return _events[eventId];
+    }
+
+    function getEventTierAmount(bytes32 eventId, uint8 tier) external view returns (uint256) {
+        return _eventTierAmounts[eventId][tier];
     }
 
     function hasClaimed(bytes32 eventId, address recipient) external view returns (bool) {

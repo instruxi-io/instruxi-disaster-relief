@@ -77,20 +77,6 @@ Admin:             0x<YOUR_ADDRESS>
 
 ---
 
-## Step 2b — Set Tier Amounts
-
-After deploy, configure the USDC payout for each tier (must be done before recipients can claim):
-
-```bash
-npx hardhat set-tier-amounts --network sepolia \
-  --contract 0x<CONTRACT_ADDRESS> \
-  --tiers 1,2 \
-  --amounts 50000000,100000000
-# tier 1 = $50 USDC (standard), tier 2 = $100 USDC (priority)
-```
-
----
-
 ## Step 3 — Update Workflow Config
 
 Open `workflow/config.staging.json` and fill in all placeholders:
@@ -154,12 +140,18 @@ cast keccak "US-FLOOD-2026-001"
 # → 0xfe3dfcfbd3a3040c4882787cfb0471a41ce91cc9e728b73d68b1b44ae8789477
 ```
 
+> **Admin role note:** For this hackathon, Instruxi is the admin. In production this should be the charity or funding organisation's wallet — the entity responsible for setting tier amounts and accountable for the disbursement commitments.
+
 ```bash
-# Register the event
+# Register the event and atomically commit per-tier payout amounts.
+# Amounts are LOCKED at registration — they cannot be changed after this call.
+# Tier 1 = standard $50 USDC, Tier 2 = priority $100 USDC.
 npx hardhat register-event --network sepolia \
   --contract 0x<CONTRACT_ADDRESS> \
   --eventid 0xfe3dfcfbd3a3040c4882787cfb0471a41ce91cc9e728b73d68b1b44ae8789477 \
-  --cap 5000000000
+  --cap 5000000000 \
+  --tiers 1,2 \
+  --amounts 50000000,100000000
 
 # Request verification — this emits RequestSent (SAVE THIS TX HASH)
 #
@@ -244,6 +236,28 @@ npm run process-roster -- \
 
 ---
 
+## Step 9b — Anchor the Roster Hash Onchain
+
+After processing each roster, anchor its SHA-256 hash onchain so anyone can verify that tier assignments were not changed after the fact.
+
+```bash
+# Compute SHA-256 of the original CSV file
+sha256sum rosters/sample-roster.csv
+# → abc123...  rosters/sample-roster.csv
+
+# Convert to bytes32 hex (prepend 0x) and anchor onchain
+npx hardhat anchor-roster --network sepolia \
+  --contract 0x<CONTRACT_ADDRESS> \
+  --rosterhash 0x<SHA256_HEX> \
+  --eventid 0xfe3dfcfbd3a3040c4882787cfb0471a41ce91cc9e728b73d68b1b44ae8789477 \
+  --program US-FLOOD-2026 \
+  --region US-CA
+```
+
+This emits `RosterAnchored(rosterHash, eventId, program, region)` onchain. Anyone can SHA-256 the original CSV and compare to this event to verify the integrity of tier assignments.
+
+---
+
 ## Step 10 — Activate Event
 
 After CRE verifies the event (status becomes `Verified`):
@@ -283,8 +297,9 @@ npm run attest -- proof-of-funds \
 Record a walkthrough covering:
 - [ ] Deployed contract on Sepolia Etherscan
 - [ ] CRE simulation terminal output
-- [ ] `npm run setup-groups` running
+- [ ] `npm run setup-groups` running (tier-suffixed groups `:1`, `:2`)
 - [ ] `npm run upload-roster` + `process-roster` running
+- [ ] `anchor-roster` tx visible on Etherscan (RosterAnchored event)
 - [ ] `claimDisbursement` → CRE callback → USDC transfer on Etherscan
 - [ ] TrustSync attestation visible in Instruxi dashboard
 

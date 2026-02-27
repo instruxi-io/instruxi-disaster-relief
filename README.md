@@ -160,28 +160,29 @@ npm run setup-groups -- --program US-FLOOD-2026 --regions "US-CA,US-TX,US-FL"
 
 Creates `Admins:US-FLOOD-2026`, `Partners:US-FLOOD-2026`, `Eligible:US-FLOOD-2026:US-CA:1`, `Eligible:US-FLOOD-2026:US-CA:2`, etc. in Instruxi Enforcer. The `:1`/`:2` suffix encodes the tier. Save the returned group IDs.
 
-### Phase 2 — Deploy Contract + Set Tier Amounts
+### Phase 2 — Deploy Contract
 
 ```bash
 cp .env.example .env   # fill in values
 npx hardhat deploy --network sepolia
-
-# Set payout amounts for each tier (tier 1 = standard $50, tier 2 = priority $100)
-npx hardhat set-tier-amounts --network sepolia \
-  --contract 0x<TREASURY> --tiers 1,2 --amounts 50000000,100000000
 ```
 
 Update `workflow/config.staging.json` with the deployed `reliefTreasuryAddress` and your Instruxi `policyId`.
 
 ### Phase 3 — Fund Treasury + Register Event
 
+> **Admin role note:** For this hackathon, Instruxi is the admin wallet. In production this should be the charity or funding organisation's wallet — the entity that controls the money and is accountable for tier amount commitments.
+
 ```bash
 # Via Hardhat tasks
 npx hardhat deposit-usdc --network sepolia \
   --contract 0x<TREASURY> --usdc 0x<USDC> --amount 10000000000
 
+# Register event and atomically commit per-tier payout amounts
+# Tier amounts are locked at registration — they cannot be changed after this call.
 npx hardhat register-event --network sepolia \
-  --contract 0x<TREASURY> --eventid 0x... --cap 5000000000
+  --contract 0x<TREASURY> --eventid 0x... --cap 5000000000 \
+  --tiers 1,2 --amounts 50000000,100000000
 
 npx hardhat request-verification --network sepolia \
   --contract 0x<TREASURY> --eventid 0x... \
@@ -206,6 +207,20 @@ npm run process-roster -- \
 
 `processRoster` runs the full pipeline: presigned URL download → CSV validation → `POST /profile/multi-create` → tier-based `POST /admin/groups/account/add-multiple` (standard tier→`:1` group, priority tier→`:2` group) → archive file.
 
+After processing, anchor the roster hash onchain for public auditability:
+
+```bash
+# SHA-256 of the original CSV, anchored so anyone can verify tier assignments
+npx hardhat anchor-roster --network sepolia \
+  --contract 0x<TREASURY> \
+  --rosterhash 0x<SHA256_OF_CSV> \
+  --eventid 0x... \
+  --program US-FLOOD-2026 \
+  --region US-CA
+```
+
+This emits `RosterAnchored(rosterHash, eventId, program, region)` onchain. Anyone can SHA-256 the original CSV and compare to this event to verify that the tier assignments were not tampered with after anchoring.
+
 ### Phase 5 — Activate Event
 
 ```bash
@@ -220,7 +235,7 @@ Recipients call `claimDisbursement(eventId)` via the frontend (Privy SDK wallet 
 1. Calls `POST /enforcer/auth/authorize` (OPA policy) → must return `{ allowed: true }`
 2. Calls `GET /admin/groups/account/{address}/groups` → extracts tier from group name suffix (e.g. `....:2` → tier 2)
 3. Writes `onReport(0x02 + encode(requestId, allowed=true, tier=2))`
-4. Contract resolves `amount = _tierAmounts[2]` and transfers USDC
+4. Contract resolves `amount = _eventTierAmounts[eventId][2]` (locked at registration) and transfers USDC
 
 ### Phase 7 — Attestations (TrustSync)
 
@@ -348,7 +363,7 @@ npm install
 
 ```bash
 npx hardhat compile          # Compile + generate TypeChain types
-npx hardhat test             # Run 31 tests
+npx hardhat test             # Run 32 tests
 npx hardhat node             # Local Hardhat node
 npx hardhat deploy --network localhost
 npx hardhat deploy --network sepolia
@@ -362,8 +377,10 @@ npx hardhat deploy --network sepolia
 npx hardhat deposit-usdc --network sepolia \
   --contract 0x<TREASURY> --usdc 0x<USDC> --amount 1000000000
 
+# Atomically register event + lock per-tier payout amounts
 npx hardhat register-event --network sepolia \
-  --contract 0x<TREASURY> --eventid 0x... --cap 100000000
+  --contract 0x<TREASURY> --eventid 0x... --cap 5000000000 \
+  --tiers 1,2 --amounts 50000000,100000000
 
 npx hardhat request-verification --network sepolia \
   --contract 0x<TREASURY> --eventid 0x... \
@@ -372,8 +389,10 @@ npx hardhat request-verification --network sepolia \
 npx hardhat activate-event --network sepolia \
   --contract 0x<TREASURY> --eventid 0x...
 
-npx hardhat set-tier-amounts --network sepolia \
-  --contract 0x<TREASURY> --tiers 1,2 --amounts 50000000,100000000
+# Anchor processed roster SHA-256 hash onchain for public auditability
+npx hardhat anchor-roster --network sepolia \
+  --contract 0x<TREASURY> --rosterhash 0x<SHA256> \
+  --eventid 0x... --program US-FLOOD-2026 --region US-CA
 
 npx hardhat claim-disbursement --network sepolia \
   --contract 0x<TREASURY> --eventid 0x...
@@ -438,11 +457,11 @@ Enforced by `ReliefTreasury.sol` regardless of what the CRE workflow sends:
 |-----------|-------|
 | Event must be Active | `ev.status == EventStatus.Active` |
 | No double payment | `_claimed[eventId][recipient] == false` |
-| Tier must be configured | `_tierAmounts[tier] > 0` (else `TierNotConfigured`) |
+| Tier must be configured | `_eventTierAmounts[eventId][tier] > 0` (else `TierNotConfigured`) |
+| Tier ceiling at registration | `registerEvent` enforces `amount <= perRecipientCap` per tier |
 | Per-event cap | `ev.totalDisbursed + amount <= ev.perEventCap` |
 | Program cap | `totalDisbursed + amount <= programCap` |
 | Treasury balance | `usdc.balanceOf(address(this)) >= amount` |
-| Tier ceiling | `setTierAmounts` enforces `amount <= perRecipientCap` |
 
 ---
 
@@ -465,7 +484,8 @@ Enforced by `ReliefTreasury.sol` regardless of what the CRE workflow sends:
 | Event verification fulfillment tx | Roster CSV (encrypted Object Storage) |
 | Disbursement transactions | Group memberships + tier assignment (Enforcer) |
 | TrustSync attestations + batch proofs | Policy decisions (OPA Rego) |
-| Tier amounts (`_tierAmounts[1] = $50`, etc.) | Phone/email → wallet mapping (Privy) |
+| Per-event tier amounts (locked at `registerEvent`) | Phone/email → wallet mapping (Privy) |
+| Roster SHA-256 hashes (`RosterAnchored` events) | Roster CSV contents (encrypted Object Storage) |
 
 ---
 

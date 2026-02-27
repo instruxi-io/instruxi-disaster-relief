@@ -4,11 +4,13 @@ import { ethers } from "ethers";
 // ================================================================
 //  register-event
 // ================================================================
-task("register-event", "Register a new disaster event in ReliefTreasury")
+task("register-event", "Register a new disaster event and commit per-tier payout amounts atomically")
   .addParam("contract", "ReliefTreasury address")
   .addParam("eventid", "Event ID (hex bytes32, or string that will be hashed)")
-  .addParam("cap", "Per-event USDC cap (6 decimals, e.g. 100000000 = $100)")
-  .setAction(async ({ contract, eventid, cap }, hre) => {
+  .addParam("cap", "Per-event USDC cap (6 decimals, e.g. 5000000000 = $5000)")
+  .addParam("tiers", "Comma-separated tier numbers, e.g. 1,2")
+  .addParam("amounts", "Comma-separated raw USDC amounts per tier (6 dec), e.g. 50000000,100000000")
+  .setAction(async ({ contract, eventid, cap, tiers, amounts }, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const relief = await hre.ethers.getContractAt("ReliefTreasury", contract, signer);
 
@@ -16,8 +18,21 @@ task("register-event", "Register a new disaster event in ReliefTreasury")
       ? eventid
       : hre.ethers.keccak256(hre.ethers.toUtf8Bytes(eventid));
 
-    console.log(`Registering event ${eventId} with cap $${Number(cap) / 1e6} USDC...`);
-    const tx = await (relief as any).registerEvent(eventId, BigInt(cap));
+    const tierArr   = (tiers as string).split(",").map((t: string) => parseInt(t.trim(), 10));
+    const amountArr = (amounts as string).split(",").map((a: string) => BigInt(a.trim()));
+
+    if (tierArr.length !== amountArr.length) {
+      console.error("Error: tiers and amounts must have the same number of entries");
+      process.exit(1);
+    }
+
+    console.log(`Registering event ${eventId}:`);
+    console.log(`  Per-event cap: $${Number(cap) / 1e6} USDC`);
+    tierArr.forEach((t: number, i: number) =>
+      console.log(`  Tier ${t}: $${Number(amountArr[i]) / 1e6} USDC`)
+    );
+
+    const tx = await (relief as any).registerEvent(eventId, BigInt(cap), tierArr, amountArr);
     const receipt = await tx.wait();
     console.log(`✅ Event registered. Tx: ${receipt.hash}`);
   });
@@ -66,32 +81,26 @@ task("activate-event", "Activate a verified event to enable disbursements")
   });
 
 // ================================================================
-//  set-tier-amounts
+//  anchor-roster
 // ================================================================
-task("set-tier-amounts", "Set USDC payout amounts for each tier (admin only)")
+task("anchor-roster", "Anchor a processed roster's SHA-256 hash onchain for public auditability")
   .addParam("contract", "ReliefTreasury address")
-  .addParam("tiers", "Comma-separated tier numbers, e.g. 1,2")
-  .addParam("amounts", "Comma-separated raw USDC amounts (6 dec), e.g. 50000000,100000000")
-  .setAction(async ({ contract, tiers, amounts }, hre) => {
+  .addParam("rosterhash", "SHA-256 hash of the original CSV (hex bytes32)")
+  .addParam("eventid", "Event ID (hex bytes32)")
+  .addParam("program", "Program identifier, e.g. US-FLOOD-2026")
+  .addParam("region", "Region identifier, e.g. US-CA")
+  .setAction(async ({ contract, rosterhash, eventid, program, region }, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const relief = await hre.ethers.getContractAt("ReliefTreasury", contract, signer);
 
-    const tierArr   = (tiers as string).split(",").map((t: string) => parseInt(t.trim(), 10));
-    const amountArr = (amounts as string).split(",").map((a: string) => BigInt(a.trim()));
+    console.log(`Anchoring roster hash ${rosterhash.slice(0, 10)}... for event ${eventid.slice(0, 10)}...`);
+    console.log(`  Program: ${program}`);
+    console.log(`  Region:  ${region}`);
 
-    if (tierArr.length !== amountArr.length) {
-      console.error("Error: tiers and amounts must have the same number of entries");
-      process.exit(1);
-    }
-
-    console.log("Setting tier amounts:");
-    tierArr.forEach((t: number, i: number) =>
-      console.log(`  Tier ${t}: $${Number(amountArr[i]) / 1e6} USDC`)
-    );
-
-    const tx = await (relief as any).setTierAmounts(tierArr, amountArr);
+    const tx = await (relief as any).anchorRoster(rosterhash, eventid, program, region);
     const receipt = await tx.wait();
-    console.log(`✅ Tier amounts set. Tx: ${receipt.hash}`);
+    console.log(`✅ Roster anchored. Anyone can verify by hashing the original CSV and comparing.`);
+    console.log(`   Tx: ${receipt.hash}`);
   });
 
 // ================================================================
@@ -167,18 +176,6 @@ task("treasury-status", "Print ReliefTreasury status")
     console.log(`Remaining Cap:     $${Number(remaining) / 1e6} USDC`);
     console.log(`Per-Recipient Cap: $${Number(perRecipientCap) / 1e6} USDC`);
 
-    // Print configured tier amounts (tiers 1–5)
-    const tierAmounts: string[] = [];
-    for (let t = 1; t <= 5; t++) {
-      const amt: bigint = await (relief as any).getTierAmount(t);
-      if (amt > 0n) tierAmounts.push(`Tier ${t}: $${Number(amt) / 1e6} USDC`);
-    }
-    if (tierAmounts.length > 0) {
-      console.log("─".repeat(50));
-      console.log("Tier Amounts:");
-      tierAmounts.forEach((line) => console.log(`  ${line}`));
-    }
-
     if (eventid) {
       const ev = await (relief as any).getEventRecord(eventid);
       const statuses = ["Unregistered", "Pending", "Verified", "Active", "Closed"];
@@ -187,6 +184,17 @@ task("treasury-status", "Print ReliefTreasury status")
       console.log(`  Status:          ${statuses[Number(ev.status)]}`);
       console.log(`  Per-event cap:   $${Number(ev.perEventCap) / 1e6}`);
       console.log(`  Disbursed:       $${Number(ev.totalDisbursed) / 1e6}`);
+
+      // Print per-event tier amounts (tiers 1–5)
+      const tierAmounts: string[] = [];
+      for (let t = 1; t <= 5; t++) {
+        const amt: bigint = await (relief as any).getEventTierAmount(eventid, t);
+        if (amt > 0n) tierAmounts.push(`Tier ${t}: $${Number(amt) / 1e6} USDC`);
+      }
+      if (tierAmounts.length > 0) {
+        console.log(`  Tier amounts:`);
+        tierAmounts.forEach((line) => console.log(`    ${line}`));
+      }
     }
     console.log("=".repeat(50));
   });
