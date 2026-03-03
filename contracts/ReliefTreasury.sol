@@ -59,6 +59,7 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     bytes32 public constant DEPOSITOR_ROLE = keccak256("DEPOSITOR_ROLE");
     bytes32 public constant PAUSER_ROLE    = keccak256("PAUSER_ROLE");
 
+
     // ================================================================
     //                    REQUEST TYPE CONSTANTS
     // ================================================================
@@ -390,8 +391,9 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
         _setFulfillerAuthorization(fulfiller, authorized);
     }
 
+    /// @notice Update the CRE request timeout. Base contract enforces [1 day, 30 days].
     function setRequestTimeout(uint256 timeout) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _setRequestTimeout(timeout);
+        _setRequestTimeout(timeout); // reverts InvalidTimeout if outside [1 day, 30 days]
     }
 
     function pause() external onlyRole(PAUSER_ROLE) { _pause(); }
@@ -403,6 +405,9 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     function emergencyWithdraw(address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (!paused()) revert NotPaused();
         require(to != address(0), "ReliefTreasury: zero address");
+        // Keep totalDeposited accurate — clamp to zero if more is withdrawn than deposited
+        // (can happen if USDC was sent directly to the contract outside of deposit())
+        totalDeposited = amount <= totalDeposited ? totalDeposited - amount : 0;
         usdc.safeTransfer(to, amount);
         emit EmergencyWithdraw(to, amount);
     }
@@ -450,6 +455,7 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
         DisbursementRequest storage req = _disbursementRequests[requestId];
         if (req.recipient != address(0)) {
             _hasPendingRequest[req.eventId][req.recipient] = false;
+            emit PendingRequestCleared(req.eventId, req.recipient);
         }
     }
 
@@ -477,6 +483,7 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
         // Always clear pending — even on denial — so recipient can retry
         _hasPendingRequest[eventId][recipient] = false;
+        emit PendingRequestCleared(eventId, recipient);
 
         if (!allowed) return;
 

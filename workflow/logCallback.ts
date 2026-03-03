@@ -236,6 +236,10 @@ function checkEligibilityAndTier(
     if (authRes.statusCode >= 500) {
       throw new Error(`[Enforcer] OPA server error ${authRes.statusCode} — DON will retry`);
     }
+    // 401/403 = bad or expired API key — throw so the misconfiguration surfaces, not silently denies everyone
+    if (authRes.statusCode === 401 || authRes.statusCode === 403) {
+      throw new Error(`[Enforcer] OPA auth error ${authRes.statusCode} — check INSTRUXI_API_KEY`);
+    }
 
     const authBody = JSON.parse(authRes.body) as { allowed: boolean };
     if (!authBody.allowed) {
@@ -262,6 +266,9 @@ function checkEligibilityAndTier(
 
     if (groupsRes.statusCode >= 500) {
       throw new Error(`[Enforcer] Groups API server error ${groupsRes.statusCode} — DON will retry`);
+    }
+    if (groupsRes.statusCode === 401 || groupsRes.statusCode === 403) {
+      throw new Error(`[Enforcer] Groups API auth error ${groupsRes.statusCode} — check INSTRUXI_API_KEY`);
     }
 
     const groupsBody = JSON.parse(groupsRes.body) as { success?: boolean; data?: string[] };
@@ -436,10 +443,10 @@ function handleDisbursement(
     recipient = addr as string;
     runtime.log(`[Step 2] recipient: ${recipient} eventId: ${decodedEventId}`);
   } catch (err) {
-    runtime.log(`[Step 2] Decode error: ${err}`);
-    const report = encodeDisbursementReport(requestId, false, 0);
-    const txHash = writeReport(runtime, report);
-    return `Disbursement: decode error tx=${txHash}`;
+    // Corrupted requestData is unresolvable — throw so the DON retries rather than
+    // writing a permanent denial for a request that can't be decoded
+    runtime.log(`[Step 2] Decode error: ${err} — throwing so DON can retry`);
+    throw err instanceof Error ? err : new Error(String(err));
   }
 
   const { allowed, tier } = checkEligibilityAndTier(runtime, recipient, decodedEventId);

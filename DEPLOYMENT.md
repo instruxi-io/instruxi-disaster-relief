@@ -2,7 +2,7 @@
 
 Step-by-step checklist to go from zero to a live Sepolia deployment with CRE simulation evidence.
 
-> **Hackathon deployment note:** Several steps below reflect intentional hackathon trade-offs — single admin wallet instead of multisig, direct EOA deployment instead of a Safe + timelock, Sepolia testnet instead of mainnet. These are documented decisions, not oversights. See the [Architectural Decisions & Hackathon Trade-offs](README.md#architectural-decisions--hackathon-trade-offs) section in the README for the full rationale and V2 upgrade path for each one.
+> **Deployment scope:** This guide targets a Sepolia testnet deployment with a single admin wallet. These are intentional scope decisions — the contract architecture is fully compatible with a Gnosis Safe + TimelockController without code changes. See [Design Decisions](README.md#design-decisions) and [Known Limitations](README.md#known-limitations) in the README for the rationale and production upgrade path for each choice.
 
 ---
 

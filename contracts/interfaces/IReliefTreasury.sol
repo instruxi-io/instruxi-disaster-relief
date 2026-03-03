@@ -41,6 +41,7 @@ interface IReliefTreasury {
     event RosterAnchored(bytes32 indexed rosterHash, bytes32 indexed eventId, string program, string region);
 
     event DisbursementRequested(bytes32 indexed requestId, bytes32 indexed eventId, address indexed recipient);
+    event PendingRequestCleared(bytes32 indexed eventId, address indexed recipient);
     event Disbursed(bytes32 indexed eventId, address indexed recipient, uint256 amount);
     event DeliveryConfirmed(bytes32 indexed eventId, address indexed recipient);
     event EmergencyWithdraw(address indexed to, uint256 amount);

@@ -7,32 +7,81 @@ A SaaS disbursement platform for disaster relief charities, built on Instruxi + 
 
 ---
 
-## Architectural Decisions & Hackathon Trade-offs
+## Design Decisions
 
-This project was built under a hackathon deadline. Every decision below was **deliberate** — the alternatives are documented as the post-hackathon V2 roadmap. Reviewers should read this section before evaluating the code; none of these are missed edge cases or unknowns.
+This project makes specific architectural choices around privacy, decentralization, and correctness. Each decision below is documented with its technical reasoning and the production upgrade path. Some are sound by design and would remain in V2. Others are explicit scope decisions tied to this build. **None of these are unknowns or missed edge cases.**
 
-### What We Chose and Why
+---
 
-| Decision | What We Did | Why (Hackathon) | V2 Upgrade Path |
-|---|---|---|---|
-| **Roster eligibility** | Instruxi Enforcer group membership + group name suffix encodes tier (`....:N`); CRE reads this offchain | No onchain eligibility gate = no blocker if we haven't finished processing every recipient before demo. Privacy-preserving: wallet→tier mapping stays offchain | Merkle root committed onchain at `anchorRoster` time; recipient submits proof at claim time. Eliminates all trust in the CRE workflow for eligibility decisions. |
-| **Pending request guard** | `_hasPendingRequest` mapping prevents a recipient from spamming `claimDisbursement` before their first callback lands | Closes the unbounded-claiming DoS vector with ~10 lines. Complete protection without requiring the Merkle redesign. | Merkle proofs make this moot — a valid proof can only be submitted once. |
-| **Admin wallet** | Single EOA holds `DEFAULT_ADMIN_ROLE` | Speed. Deployer is the admin for the demo. | Gnosis Safe multisig + OpenZeppelin `TimelockController` before any real funds are at risk. README explicitly notes the deployer should transfer this role immediately post-deploy in production. |
-| **CRE callback = graceful returns** | `_handleDisbursement` returns silently on cap exceeded / unconfigured tier / not-active, never reverts | A reverting CRE callback is a "poison pill" — it permanently denies the recipient because the requestId cannot be replayed. Graceful return lets the user retry after the root cause is fixed. | Same pattern; intentional by design even at V2. |
-| **OPA policy check in CRE** | `POST /enforcer/auth/authorize` is Step 1 of the disbursement workflow; `eventId` is in the OPA input | Decentralized enforcement: the policy runs inside the DON, not on a centralized server. Full audit trail of every authorization decision. | Add roster-epoch scoping to OPA policy; combine with Merkle proof for defence-in-depth. |
-| **Tier extraction from group name suffix** | Group named `Eligible:US-FLOOD-2026:US-CA:2` → tier 2 via regex `/:([1-9]\d*)$/` | Tier is embedded at group creation time by the admin; CRE doesn't need a separate config lookup. Regex-validated and bounded to [1–255]. | Explicit tier field in attestation; or Merkle leaf encodes tier directly. |
-| **CSV-based roster ingestion** | `processRoster.ts` reads a partner-provided CSV | Controlled input for demo. CSV is a universal format partners already use. | Streaming CSV parser with schema validation; canonical field-ordering normalization before SHA-256 hashing. |
-| **No batched processRoster** | One recipient processed at a time in the script | Simplest correct thing. Demo roster is small. | Worker queue + `POST /profile/multi-create` batch endpoint already in the Instruxi API. |
-| **No `EventStatus.Rejected`** | CRE returning `verified=false` leaves event in `Pending`; admin can re-verify or close | Not needed for the demo flow | Add `Rejected` status + `EventRejected` event; re-verification requires admin action. |
-| **Auth in CRE via `runtime.secrets()`** | `INSTRUXI_API_KEY` and `RWA_GATEWAY_JWT` loaded from CRE secrets vault at runtime | Correct pattern — secrets never appear in workflow source or config files. Enforced in this codebase now, not deferred. | No change needed; this is already the production pattern. |
+### Offchain Eligibility via Instruxi Enforcer
 
-### What We Explicitly Did NOT Do (and Why Each Was Out of Scope)
+Recipient wallet-to-eligibility mappings are personally identifiable data. Storing them onchain would be a GDPR problem and a privacy failure. Instruxi Enforcer keeps that mapping encrypted and access-controlled. The OPA policy — running inside the Chainlink DON as part of the CRE workflow — makes the authorization decision in a decentralized way. Every decision produces a cryptographic audit trail.
 
-- **Merkle roster proofs** — the right long-term answer for onchain eligibility without exposing recipient data. Requires redesigning the claim flow (proof submission → verify → transfer) and changes the UX. This is V2.
-- **Multisig + timelock** — a deployment and governance decision, not a code change. The contract architecture is compatible; it requires the deployer to transfer `DEFAULT_ADMIN_ROLE` to a Safe and configure a timelock post-deploy.
-- **Batched `processRoster`** — operational scaling. Current single-recipient loop is correct; it just needs parallelism for production roster sizes.
-- **Canonical roster hashing** — the `RosterAnchored` event uses SHA-256 of the raw CSV bytes. A production system would normalize field ordering and encoding before hashing to prevent hash drift across environments.
-- **EventStatus.Rejected** — not in scope for hackathon demo flow; the state machine is designed to accommodate this without breaking changes.
+Tier is encoded in the Enforcer group name suffix at group creation time (e.g. `Eligible:US-FLOOD-2026:US-CA:2` → tier 2). The CRE workflow extracts it via regex `/:([1-9]\d*)$/`, bounded to [1–255]. This means the admin commits to tier assignments at group setup time, before any roster is processed — not at claim time.
+
+The roster CSV's SHA-256 hash is anchored onchain via `anchorRoster()`. Anyone can hash the original CSV and compare to the `RosterAnchored` event to verify that tier assignments weren't modified after processing.
+
+**Known limitation:** The onchain contract trusts the CRE/Enforcer pipeline for eligibility. A compromised Instruxi API could approve an ineligible recipient. Cap checks and the double-payment guard limit blast radius but do not close this trust assumption.
+
+**V2:** Merkle root committed onchain at `anchorRoster` time. Recipient submits a Merkle proof at claim time. Eligibility and tier verified entirely onchain with no offchain trust.
+
+---
+
+### Graceful Returns in CRE Callbacks
+
+`_handleDisbursement` never reverts. Cap exceeded, unconfigured tier, closed event — all produce a silent return. The pending flag is always cleared so the recipient can retry.
+
+A reverting CRE callback is a permanent denial. The Chainlink Forwarder writes the callback as a transaction — if it reverts, the requestId is marked fulfilled and cannot be replayed. The recipient would be permanently locked out even if the root cause was transient (e.g. the event was closed and then reopened). Graceful returns are correct by design and remain the right choice at V2.
+
+---
+
+### Pending Request Guard
+
+`_hasPendingRequest[eventId][recipient]` is set when a claim is submitted and cleared unconditionally when the CRE callback lands — whether approved or denied — or when the request times out via `cancelRequest`. A second `claimDisbursement` before the first callback reverts with `PendingRequestExists`. The `PendingRequestCleared` event lets offchain indexers track this state without polling.
+
+This guard closes the request-spam DoS vector at the contract level. It becomes unnecessary under the Merkle V2 design, where a valid proof can only be submitted once.
+
+---
+
+### OPA Policy Inside the DON
+
+Step 1 of every disbursement is `POST /enforcer/auth/authorize` with `{ action: "claim_disbursement", recipient, eventId }`. This runs inside the Chainlink DON as part of the CRE workflow — not on a centralized application server. The `eventId` is included so the policy can scope decisions to a specific event.
+
+5xx responses and 401/403 auth errors throw so the DON retries rather than writing a permanent denial. A misconfigured or expired API key surfaces as a retryable error, not a silent mass denial. Only a 200 `{ allowed: false }` is treated as a definitive policy decision.
+
+---
+
+### Roster Hash Anchoring
+
+`anchorRoster()` takes the SHA-256 of the raw CSV bytes as a `bytes32` and emits `RosterAnchored(rosterHash, eventId, program, region)`. Anyone can hash the original CSV and compare to this event.
+
+**Known limitation:** SHA-256 of raw bytes is sensitive to line ending differences (CRLF vs. LF). A Windows machine and a Linux CI pipeline produce different hashes for the same logical file. For a controlled demo environment this is acceptable.
+
+**V2:** Normalize to LF and sort fields canonically before hashing, or hash a JSON representation with fixed field ordering.
+
+---
+
+### Single Admin Wallet
+
+A single EOA holds `DEFAULT_ADMIN_ROLE`. This controls event registration, activation, closure, emergency withdrawal, and fulfiller authorization. There is no multisig and no timelock.
+
+This is an explicit scope decision. There is no technical justification for a single admin key in a contract holding real funds.
+
+**Production requirement:** Transfer `DEFAULT_ADMIN_ROLE` to a Gnosis Safe multisig immediately post-deploy. Wrap `registerEvent`, `activateEvent`, `closeEvent`, and `emergencyWithdraw` behind an OpenZeppelin `TimelockController`. The contract architecture is fully compatible — no code changes required.
+
+---
+
+## Known Limitations
+
+Explicitly identified and out of scope for this build. The contract is designed to accommodate each upgrade without breaking changes.
+
+| Limitation | Impact | V2 Path |
+|---|---|---|
+| Offchain eligibility | Eligibility trusts CRE/Enforcer pipeline | Onchain Merkle proof at claim time |
+| Single admin key | One compromised key can drain treasury | Gnosis Safe + TimelockController |
+| Raw CSV hashing | Hash differs across OS line endings | Canonical normalization before SHA-256 |
+| No `EventStatus.Rejected` | Failed verification leaves event in `Pending`; admin closes manually | `Rejected` status + `EventRejected` event |
+| Sequential `processRoster` | Large rosters require sequential processing | Worker queue + batch API endpoints |
 
 ---
 
@@ -168,7 +217,7 @@ instruxi-disaster-relief/
 │   └── relief-tasks.ts             # Hardhat tasks: fund, register-event, etc.
 │
 ├── test/
-│   └── ReliefTreasury.test.ts      # 34 tests — full contract coverage
+│   └── ReliefTreasury.test.ts      # 35 tests — full contract coverage
 │
 ├── rosters/
 │   └── sample-roster.csv           # Example CSV for processRoster.ts
@@ -392,7 +441,7 @@ npm install
 
 ```bash
 npx hardhat compile          # Compile + generate TypeChain types
-npx hardhat test             # Run 34 tests
+npx hardhat test             # Run 35 tests
 npx hardhat node             # Local Hardhat node
 npx hardhat deploy --network localhost
 npx hardhat deploy --network sepolia
@@ -497,12 +546,38 @@ Enforced by `ReliefTreasury.sol` regardless of what the CRE workflow sends:
 
 ## Security
 
-- `ReentrancyGuard` on all state-changing external functions
-- `Pausable` with `emergencyWithdraw` for crisis response
-- `AccessControl` — `DEFAULT_ADMIN_ROLE`, `DEPOSITOR_ROLE`, `PAUSER_ROLE`
-- `authorizedFulfillers` mapping — only the Chainlink Forwarder (or admin-approved addresses) can call `onReport()` or `fulfillRequest()`
-- CEI pattern — all state mutations before `safeTransfer`
-- CRE workflow cannot bypass onchain invariants — it can only provide a `bool` result; the contract enforces all caps and guards independently
+### Enforced Onchain (Cannot Be Bypassed by Any Offchain Component)
+
+| Guard | Mechanism |
+|---|---|
+| No payout unless event is Active | `ev.status == EventStatus.Active` checked before every transfer |
+| No double payment | `_claimed[eventId][recipient]` write-once flag |
+| No request spam | `_hasPendingRequest` pending guard in `claimDisbursement` |
+| Per-event cap | `ev.totalDisbursed + amount <= ev.perEventCap` |
+| Program cap | `totalDisbursed + amount <= programCap` |
+| Tier must be registered | `_eventTierAmounts[eventId][tier] > 0` |
+| Tier ceiling at registration | Each tier amount bounded by `perRecipientCap` at `registerEvent` time |
+| Reentrancy | `nonReentrant` on all state-changing external functions |
+| Fulfiller whitelist | Only addresses in `authorizedFulfillers` can call `onReport()` or `fulfillRequest()` |
+| CEI pattern | All state mutations precede `safeTransfer` |
+
+### Trust Model
+
+The contract trusts the Chainlink Forwarder address in `authorizedFulfillers`. That Forwarder is controlled by the Chainlink DON, which runs the CRE workflow. The CRE workflow calls the Instruxi API.
+
+```
+ReliefTreasury.sol
+  └── authorizedFulfillers (Chainlink Forwarder)
+        └── Chainlink DON
+              └── CRE workflow (logCallback.ts)
+                    └── Instruxi API (OPA policy + group membership)
+```
+
+What this means:
+
+- **The contract cannot be over-transferred.** The CRE workflow provides only `(bool allowed, uint8 tier)`. All financial enforcement runs onchain independently.
+- **The contract can be told to pay an ineligible recipient** if the Instruxi API approves them. Cap checks and the double-payment guard bound the damage per event and per program, but they do not prevent a compromised eligibility pipeline from approving fraudulent claims up to those caps.
+- **Admin key compromise is the highest-risk vector.** A compromised `DEFAULT_ADMIN_ROLE` key can pause the contract and drain via `emergencyWithdraw`. See [Known Limitations](#known-limitations) for the production mitigation.
 
 ---
 
@@ -516,7 +591,7 @@ Enforced by `ReliefTreasury.sol` regardless of what the CRE workflow sends:
 | TrustSync attestations + batch proofs | Policy decisions (OPA Rego) |
 | Per-event tier amounts (locked at `registerEvent`) | Phone/email → wallet mapping (Privy) |
 | Roster SHA-256 hashes (`RosterAnchored` events) | Roster CSV contents (encrypted Object Storage) |
-| CRE workflow enforces auth (`INSTRUXI_API_KEY`, `RWA_GATEWAY_JWT` from `runtime.secrets()`) | API credentials (CRE secrets vault) |
+| Cap enforcement, double-payment guard, pending guard | API credentials (`INSTRUXI_API_KEY`, `RWA_GATEWAY_JWT` — CRE secrets vault) |
 
 ---
 
