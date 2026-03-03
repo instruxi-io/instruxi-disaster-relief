@@ -315,9 +315,10 @@ describe("ReliefTreasury", function () {
       expect(await usdc.balanceOf(recipient.address)).to.equal(balanceBefore);
     });
 
-    it("reverts with TierNotConfigured if tier has no amount set", async function () {
-      const { treasury, fulfiller, recipient, EVENT_ID } = await activeEventFixture();
+    it("unconfigured tier in CRE callback — no transfer, no revert", async function () {
+      const { treasury, usdc, fulfiller, recipient, EVENT_ID } = await activeEventFixture();
 
+      const balanceBefore = await usdc.balanceOf(recipient.address);
       const tx = await treasury.connect(recipient).claimDisbursement(EVENT_ID);
       const receipt = await tx.wait();
       const iface = treasury.interface;
@@ -326,9 +327,11 @@ describe("ReliefTreasury", function () {
         .find((l: any) => l?.name === "RequestSent");
       const requestId = requestSentLog!.args.requestId;
 
+      // Tier 3 has no amount configured — callback must not revert; no transfer
       await expect(
         treasury.connect(fulfiller).onReport("0x", encodeDisbursementReport(requestId, true, 3))
-      ).to.be.revertedWithCustomError(treasury, "TierNotConfigured");
+      ).not.to.be.reverted;
+      expect(await usdc.balanceOf(recipient.address)).to.equal(balanceBefore);
     });
 
     it("prevents double-claim by same recipient", async function () {
@@ -374,7 +377,7 @@ describe("ReliefTreasury", function () {
       ).to.be.revertedWithCustomError(treasury, "EventNotActive");
     });
 
-    it("enforces per-event cap", async function () {
+    it("cap exceeded — CRE callback completes without reverting", async function () {
       const [, admin2, fulfiller2, r1, r2] = await ethers.getSigners();
 
       const MockUSDC = await ethers.getContractFactory("MockUSDC");
@@ -405,21 +408,55 @@ describe("ReliefTreasury", function () {
       await treasury.connect(fulfiller2).onReport("0x", encodeEventVerificationReport(vLog!.args.requestId, true));
       await treasury.connect(admin2).activateEvent(eventId);
 
-      // r1 claims tier 2 ($60) successfully
+      // r1 claims tier 2 ($60) — fills the $100 event cap (only $40 remains after)
       const claimTx1 = await treasury.connect(r1).claimDisbursement(eventId);
       const cLog1 = (await claimTx1.wait())!.logs
         .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
         .find((l: any) => l?.name === "RequestSent");
       await treasury.connect(fulfiller2).onReport("0x", encodeDisbursementReport(cLog1!.args.requestId, true, 2));
 
-      // r2 tries tier 2 ($60) but only $40 remains → PerEventCapExceeded
+      const r2BalanceBefore = await usdc.balanceOf(r2.address);
+
+      // r2 tries tier 2 ($60) but only $40 remains in per-event cap
+      // Callback must NOT revert — graceful return, no Disbursed event
       const claimTx2 = await treasury.connect(r2).claimDisbursement(eventId);
       const cLog2 = (await claimTx2.wait())!.logs
         .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
         .find((l: any) => l?.name === "RequestSent");
       await expect(
         treasury.connect(fulfiller2).onReport("0x", encodeDisbursementReport(cLog2!.args.requestId, true, 2))
-      ).to.be.revertedWithCustomError(treasury, "PerEventCapExceeded");
+      ).not.to.emit(treasury, "Disbursed");
+
+      // r2 receives nothing
+      expect(await usdc.balanceOf(r2.address)).to.equal(r2BalanceBefore);
+    });
+
+    it("pending guard prevents double-submission before CRE callback", async function () {
+      const { treasury, recipient, EVENT_ID } = await activeEventFixture();
+      await treasury.connect(recipient).claimDisbursement(EVENT_ID);
+      // Second call before callback should revert with PendingRequestExists
+      await expect(treasury.connect(recipient).claimDisbursement(EVENT_ID))
+        .to.be.revertedWithCustomError(treasury, "PendingRequestExists");
+    });
+
+    it("pending guard is cleared after CRE denial — retry is allowed", async function () {
+      const { treasury, fulfiller, recipient, EVENT_ID } = await activeEventFixture();
+      const tx = await treasury.connect(recipient).claimDisbursement(EVENT_ID);
+      const receipt = await tx.wait();
+      const iface = treasury.interface;
+      const requestSentLog = receipt!.logs
+        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
+        .find((l: any) => l?.name === "RequestSent");
+      const requestId = requestSentLog!.args.requestId;
+
+      // CRE denies — pending flag must be cleared even on denial
+      await treasury.connect(fulfiller).onReport(
+        "0x", encodeDisbursementReport(requestId, false, 1)
+      );
+
+      // Recipient can retry — should not revert with PendingRequestExists
+      await expect(treasury.connect(recipient).claimDisbursement(EVENT_ID))
+        .not.to.be.revertedWithCustomError(treasury, "PendingRequestExists");
     });
   });
 

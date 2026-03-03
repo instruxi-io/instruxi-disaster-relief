@@ -202,36 +202,49 @@ function applyConsensus(
  * Step 2: Fetch Instruxi Enforcer groups; extract tier from group name suffix
  *         (e.g. "Eligible:US-FLOOD-2026:US-CA:2" → tier 2).
  *
- * Returns { allowed: false, tier: 0 } for any failure mode so the contract
- * receives a clean denial without reverting the CRE workflow.
+ * Throws on 5xx / network errors so the DON retries instead of writing a
+ * permanent denial. Returns { allowed: false, tier: 0 } only for definitive
+ * 4xx / policy-denied / missing-group outcomes.
  */
 function checkEligibilityAndTier(
   runtime: Runtime<WorkflowConfig>,
-  recipient: string
+  recipient: string,
+  eventId: string
 ): { allowed: boolean; tier: number } {
   const { baseUrl, policyId, eligibilityGroupPrefix } = runtime.config.instruxi;
+  const secrets = runtime.secrets();
+  const apiKey  = (secrets["INSTRUXI_API_KEY"] as string) ?? "";
   const http = new cre.capabilities.HTTPCapability();
 
   // Step 1: OPA policy check
-  runtime.log(`[Enforcer] OPA authorize: ${recipient}`);
+  runtime.log(`[Enforcer] OPA authorize: ${recipient} eventId=${eventId}`);
   try {
     const authRes = http.request(runtime, {
       method: "POST",
       url: `${baseUrl}/enforcer/auth/authorize`,
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+      },
       body: JSON.stringify({
         policy_id: policyId,
-        input: { action: "claim_disbursement", recipient },
+        input: { action: "claim_disbursement", recipient, eventId },
       }),
     }).result();
+
+    // 5xx = transient server error — throw so the DON retries, not permanently denies
+    if (authRes.statusCode >= 500) {
+      throw new Error(`[Enforcer] OPA server error ${authRes.statusCode} — DON will retry`);
+    }
+
     const authBody = JSON.parse(authRes.body) as { allowed: boolean };
     if (!authBody.allowed) {
       runtime.log(`[Enforcer] OPA denied: ${recipient}`);
       return { allowed: false, tier: 0 };
     }
   } catch (err) {
-    runtime.log(`[Enforcer] OPA error: ${err instanceof Error ? err.message : String(err)}`);
-    return { allowed: false, tier: 0 };
+    // Re-throw so the DON retries rather than writing a permanent denial
+    throw err instanceof Error ? err : new Error(String(err));
   }
 
   // Step 2: Fetch groups and extract tier from group name suffix
@@ -241,8 +254,16 @@ function checkEligibilityAndTier(
     const groupsRes = http.request(runtime, {
       method: "GET",
       url,
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept:      "application/json",
+        "x-api-key": apiKey,
+      },
     }).result();
+
+    if (groupsRes.statusCode >= 500) {
+      throw new Error(`[Enforcer] Groups API server error ${groupsRes.statusCode} — DON will retry`);
+    }
+
     const groupsBody = JSON.parse(groupsRes.body) as { success?: boolean; data?: string[] };
     if (!groupsBody.success || !Array.isArray(groupsBody.data)) {
       runtime.log("[Enforcer] Could not fetch groups");
@@ -255,17 +276,19 @@ function checkEligibilityAndTier(
       return { allowed: false, tier: 0 };
     }
 
-    const tier = parseInt(eligibleGroup.split(":").pop() ?? "0", 10);
-    if (!tier) {
-      runtime.log(`[Enforcer] Could not parse tier from: ${eligibleGroup}`);
+    // Strict regex: require :[1-9]\d* at end of group name, bounded [1–255]
+    const m = eligibleGroup.match(/:([1-9]\d*)$/);
+    const tier = m ? parseInt(m[1], 10) : 0;
+    if (tier < 1 || tier > 255) {
+      runtime.log(`[Enforcer] Invalid tier in group "${eligibleGroup}" — must be [1-255]`);
       return { allowed: false, tier: 0 };
     }
 
     runtime.log(`[Enforcer] Allowed, tier=${tier} (${eligibleGroup})`);
     return { allowed: true, tier };
   } catch (err) {
-    runtime.log(`[Enforcer] Group fetch error: ${err instanceof Error ? err.message : String(err)}`);
-    return { allowed: false, tier: 0 };
+    // Re-throw so the DON retries rather than writing a permanent denial
+    throw err instanceof Error ? err : new Error(String(err));
   }
 }
 
@@ -294,11 +317,15 @@ function notifyGateway(
   }
 
   try {
+    const gatewayJwt = (runtime.secrets()["RWA_GATEWAY_JWT"] as string) ?? "";
     const http = new cre.capabilities.HTTPCapability();
     const res = http.request(runtime, {
       method: "POST",
       url: `${rwGatewayUrl}/api/webhooks/cre`,
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type":  "application/json",
+        "Authorization": `Bearer ${gatewayJwt}`,
+      },
       body: JSON.stringify(payload),
     }).result();
     runtime.log(`[Gateway] CRE webhook → ${res.statusCode}`);
@@ -401,11 +428,13 @@ function handleDisbursement(
   runtime.log("── Disbursement OPA + Tier Check ───────────────────────");
 
   let recipient = "";
+  let decodedEventId = "";
 
   try {
-    const [, addr] = decodeAbiParameters(DISBURSEMENT_PARAMS, requestData);
+    const [evId, addr] = decodeAbiParameters(DISBURSEMENT_PARAMS, requestData);
+    decodedEventId = evId as string;
     recipient = addr as string;
-    runtime.log(`[Step 2] recipient: ${recipient}`);
+    runtime.log(`[Step 2] recipient: ${recipient} eventId: ${decodedEventId}`);
   } catch (err) {
     runtime.log(`[Step 2] Decode error: ${err}`);
     const report = encodeDisbursementReport(requestId, false, 0);
@@ -413,7 +442,7 @@ function handleDisbursement(
     return `Disbursement: decode error tx=${txHash}`;
   }
 
-  const { allowed, tier } = checkEligibilityAndTier(runtime, recipient);
+  const { allowed, tier } = checkEligibilityAndTier(runtime, recipient, decodedEventId);
   runtime.log(`[Result] allowed=${allowed} tier=${tier}`);
 
   const report = encodeDisbursementReport(requestId, allowed, tier);
@@ -421,13 +450,12 @@ function handleDisbursement(
   runtime.log(`[Write] ✓ tx=${txHash}`);
 
   // Notify RWA Gateway — triggers TrustSync proof-of-disbursement attestation
-  const [disbEventId] = decodeAbiParameters(DISBURSEMENT_PARAMS, requestData);
   notifyGateway(runtime, {
     requestId,
     requestType: "disbursement",
     txHash,
     result: allowed,
-    eventId:   disbEventId as string,
+    eventId:   decodedEventId,
     recipient,
   });
 

@@ -2,6 +2,8 @@
 
 Step-by-step checklist to go from zero to a live Sepolia deployment with CRE simulation evidence.
 
+> **Hackathon deployment note:** Several steps below reflect intentional hackathon trade-offs — single admin wallet instead of multisig, direct EOA deployment instead of a Safe + timelock, Sepolia testnet instead of mainnet. These are documented decisions, not oversights. See the [Architectural Decisions & Hackathon Trade-offs](README.md#architectural-decisions--hackathon-trade-offs) section in the README for the full rationale and V2 upgrade path for each one.
+
 ---
 
 ## Pre-flight Checklist

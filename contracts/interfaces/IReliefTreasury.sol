@@ -53,6 +53,7 @@ interface IReliefTreasury {
     error EventNotFound(bytes32 eventId);
     error EventNotActive(bytes32 eventId);
     error AlreadyClaimed(bytes32 eventId, address recipient);
+    error PendingRequestExists(bytes32 eventId, address recipient);
     error TierNotConfigured(uint8 tier);
     error PerEventCapExceeded(uint256 available, uint256 requested);
     error ProgramCapExceeded(uint256 available, uint256 requested);

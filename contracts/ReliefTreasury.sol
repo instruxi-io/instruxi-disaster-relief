@@ -122,6 +122,11 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     /// @notice requestId => DisbursementRequest metadata
     mapping(bytes32 => DisbursementRequest) private _disbursementRequests;
 
+    /// @notice eventId => wallet => a CRE disbursement request is currently in-flight.
+    /// @dev Prevents spamming claimDisbursement before the first callback lands,
+    ///      which would force the CRE relayer to pay gas for thousands of onReport calls.
+    mapping(bytes32 => mapping(address => bool)) private _hasPendingRequest;
+
     /// @notice Cumulative USDC deposited (informational)
     uint256 public totalDeposited;
 
@@ -307,8 +312,9 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
         returns (bytes32 requestId)
     {
         EventRecord storage ev = _events[eventId];
-        if (ev.status != EventStatus.Active) revert EventNotActive(eventId);
-        if (_claimed[eventId][msg.sender]) revert AlreadyClaimed(eventId, msg.sender);
+        if (ev.status != EventStatus.Active)                    revert EventNotActive(eventId);
+        if (_claimed[eventId][msg.sender])                      revert AlreadyClaimed(eventId, msg.sender);
+        if (_hasPendingRequest[eventId][msg.sender])            revert PendingRequestExists(eventId, msg.sender);
 
         bytes memory requestData = abi.encode(eventId, msg.sender);
         requestId = _sendRequest(REQUEST_TYPE_DISBURSEMENT, requestData);
@@ -318,6 +324,7 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
             eventId: eventId,
             recipient: msg.sender
         });
+        _hasPendingRequest[eventId][msg.sender] = true;
 
         emit DisbursementRequested(requestId, eventId, msg.sender);
     }
@@ -439,8 +446,11 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
         }
     }
 
-    function _cancelRequest(bytes32 /*requestId*/, address /*requester*/) internal override {
-        // No additional state cleanup required for MVP
+    function _cancelRequest(bytes32 requestId, address /*requester*/) internal override {
+        DisbursementRequest storage req = _disbursementRequests[requestId];
+        if (req.recipient != address(0)) {
+            _hasPendingRequest[req.eventId][req.recipient] = false;
+        }
     }
 
     // ================================================================
@@ -460,34 +470,37 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     function _handleDisbursement(bytes32 requestId, bytes memory responseData) private {
         (bool allowed, uint8 tier) = abi.decode(responseData, (bool, uint8));
-        if (!allowed) return;
 
         DisbursementRequest storage req = _disbursementRequests[requestId];
-        bytes32 eventId = req.eventId;
+        bytes32 eventId   = req.eventId;
         address recipient = req.recipient;
+
+        // Always clear pending — even on denial — so recipient can retry
+        _hasPendingRequest[eventId][recipient] = false;
+
+        if (!allowed) return;
 
         EventRecord storage ev = _events[eventId];
 
+        // Graceful returns instead of reverts — CRE callback must not revert
         if (ev.status != EventStatus.Active) return;
-        if (_claimed[eventId][recipient]) return;
+        if (_claimed[eventId][recipient])    return;
 
         uint256 amount = _eventTierAmounts[eventId][tier];
-        if (amount == 0) revert TierNotConfigured(tier);
+        if (amount == 0) return;   // TierNotConfigured — graceful
 
         uint256 evAvail   = ev.perEventCap - ev.totalDisbursed;
         uint256 progAvail = programCap - totalDisbursed;
         uint256 balance   = usdc.balanceOf(address(this));
 
-        if (amount > evAvail)   revert PerEventCapExceeded(evAvail, amount);
-        if (amount > progAvail) revert ProgramCapExceeded(progAvail, amount);
-        if (amount > balance)   revert InsufficientTreasuryFunds(balance, amount);
+        // Cap checks — graceful returns instead of reverts
+        if (amount > evAvail || amount > progAvail || amount > balance) return;
 
-        _claimed[eventId][recipient]  = true;
-        ev.totalDisbursed            += amount;
-        totalDisbursed               += amount;
+        _claimed[eventId][recipient] = true;
+        ev.totalDisbursed           += amount;
+        totalDisbursed              += amount;
 
         usdc.safeTransfer(recipient, amount);
-
         emit Disbursed(eventId, recipient, amount);
     }
 
