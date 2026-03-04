@@ -125,15 +125,32 @@ task("deposit-usdc", "Deposit USDC into ReliefTreasury")
   });
 
 // ================================================================
-//  claim-disbursement
+//  request-eligibility
 // ================================================================
-task("claim-disbursement", "Submit a disbursement claim as a recipient")
+task("request-eligibility", "Submit a candidate eligibility batch to CRE for OPA validation (CRE Pipeline 2)")
   .addParam("contract", "ReliefTreasury address")
   .addParam("eventid", "Event ID (hex bytes32)")
-  .setAction(async ({ contract, eventid }, hre) => {
+  .addParam("recipients", "Comma-separated wallet addresses")
+  .addParam("tiers", "Comma-separated tier numbers matching recipients, e.g. 1,1,2")
+  .setAction(async ({ contract, eventid, recipients, tiers }, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const relief = await hre.ethers.getContractAt("ReliefTreasury", contract, signer);
-    const tx = await (relief as any).claimDisbursement(eventid);
+
+    const recipientArr = (recipients as string).split(",").map((a: string) => a.trim());
+    const tierArr      = (tiers as string).split(",").map((t: string) => parseInt(t.trim(), 10));
+
+    if (recipientArr.length !== tierArr.length) {
+      console.error("Error: recipients and tiers must have the same number of entries");
+      process.exit(1);
+    }
+
+    console.log(`Requesting eligibility registration for event ${eventid}:`);
+    console.log(`  Candidates: ${recipientArr.length}`);
+    recipientArr.forEach((addr: string, i: number) =>
+      console.log(`  ${addr} → tier ${tierArr[i]}`)
+    );
+
+    const tx = await (relief as any).requestEligibilityRegistration(eventid, recipientArr, tierArr);
     const receipt = await tx.wait();
 
     const iface = (relief as any).interface;
@@ -142,10 +159,48 @@ task("claim-disbursement", "Submit a disbursement claim as a recipient")
       .find((l: any) => l?.name === "RequestSent");
 
     if (requestSentLog) {
-      console.log(`✅ Claim submitted. CRE will process via onReport().`);
+      console.log(`✅ Eligibility registration requested. CRE will validate via OPA and write onchain.`);
       console.log(`   requestId: ${requestSentLog.args.requestId}`);
+      console.log(`   Tx: ${receipt.hash}`);
+    } else {
+      console.log(`✅ Tx: ${receipt.hash}`);
     }
-    console.log(`   Tx: ${receipt.hash}`);
+  });
+
+// ================================================================
+//  claim-disbursement
+// ================================================================
+task("claim-disbursement", "Claim disbursement (synchronous — requires CRE eligibility to be set onchain first)")
+  .addParam("contract", "ReliefTreasury address")
+  .addParam("eventid", "Event ID (hex bytes32)")
+  .setAction(async ({ contract, eventid }, hre) => {
+    const [signer] = await hre.ethers.getSigners();
+    const relief = await hre.ethers.getContractAt("ReliefTreasury", contract, signer);
+
+    // Check eligibility before attempting claim
+    const tier: bigint = await (relief as any).getEligibilityTier(eventid, signer.address);
+    if (tier === 0n) {
+      console.error(`❌ Not eligible: ${signer.address} has no CRE-written eligibility for event ${eventid}`);
+      console.error(`   Run 'request-eligibility' first to have CRE register eligibility onchain.`);
+      process.exit(1);
+    }
+
+    console.log(`Claiming disbursement for event ${eventid} (tier ${tier})...`);
+    const tx = await (relief as any).claimDisbursement(eventid);
+    const receipt = await tx.wait();
+
+    const iface = (relief as any).interface;
+    const disbursedLog = receipt.logs
+      .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
+      .find((l: any) => l?.name === "Disbursed");
+
+    if (disbursedLog) {
+      const amount = disbursedLog.args.amount as bigint;
+      console.log(`✅ Disbursement complete: $${Number(amount) / 1e6} USDC transferred.`);
+      console.log(`   Tx: ${receipt.hash}`);
+    } else {
+      console.log(`   Tx: ${receipt.hash}`);
+    }
   });
 
 // ================================================================

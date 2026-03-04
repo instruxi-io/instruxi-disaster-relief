@@ -11,11 +11,14 @@
  *     5. Apply 2-of-3 consensus rule
  *     6. Write result via onReport(metadata, 0x01 + abi.encode(requestId, verified))
  *
- *   "disbursement":
- *     1. Decode eventId and recipient address from requestData
- *     2. POST /enforcer/auth/authorize (OPA policy check) → { allowed: boolean }
- *     3. GET  /admin/groups/account/{addr}/groups → extract tier from group name suffix
- *     4. Write result via onReport(metadata, 0x02 + abi.encode(requestId, allowed, tier))
+ *   "eligibility_registration":
+ *     1. Decode eventId, candidate addresses[], claimed tiers[] from requestData
+ *     2. For each candidate: POST /enforcer/auth/authorize (OPA policy check)
+ *     3. Collect only the OPA-approved addresses and their claimed tiers
+ *     4. Write result via onReport(metadata, 0x02 + abi.encode(requestId, approvedAddrs[], tiers[]))
+ *     5. Contract stores _eligible[eventId][addr] = tier for each approved recipient
+ *
+ * After every fulfillment: notify RWA Gateway → TrustSync attestation side-effect
  */
 
 import {
@@ -45,13 +48,13 @@ const REQUEST_SENT_ABI = parseAbi([
 // ── Typed abi parameter schemas ───────────────────────────────────────────
 
 const EVENT_VERIFICATION_PARAMS  = parseAbiParameters("bytes32 eventId, string externalRef");
-const DISBURSEMENT_PARAMS         = parseAbiParameters("bytes32 eventId, address recipient");
+const ELIGIBILITY_PARAMS         = parseAbiParameters("bytes32 eventId, address[] recipients, uint8[] tiers");
 const EVENT_VERIFICATION_REPORT_PARAMS = parseAbiParameters("bytes32, bool");
-const DISBURSEMENT_REPORT_PARAMS       = parseAbiParameters("bytes32, bool, uint8");
+const ELIGIBILITY_REPORT_PARAMS        = parseAbiParameters("bytes32, address[], uint8[]");
 
 // ── Report prefix bytes (must match ReliefTreasury Solidity constants) ────
 const PREFIX_EVENT_VERIFICATION = "01" as const;
-const PREFIX_DISBURSEMENT        = "02" as const;
+const PREFIX_ELIGIBILITY        = "02" as const;
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -74,14 +77,20 @@ function encodeEventVerificationReport(
   return `0x${PREFIX_EVENT_VERIFICATION}${payload.slice(2)}` as `0x${string}`;
 }
 
-/** Encode a disbursement report: prefix 0x02 + abi.encode(requestId, allowed, tier) */
-function encodeDisbursementReport(
+/**
+ * Encode an eligibility registration report:
+ * prefix 0x02 + abi.encode(requestId, approvedAddresses[], approvedTiers[])
+ *
+ * Only OPA-approved recipients are included. The contract stores
+ * _eligible[eventId][addr] = tier for each entry.
+ */
+function encodeEligibilityReport(
   requestId: `0x${string}`,
-  allowed: boolean,
-  tier: number
+  recipients: `0x${string}`[],
+  tiers: number[]
 ): `0x${string}` {
-  const payload = encodeAbiParameters(DISBURSEMENT_REPORT_PARAMS, [requestId, allowed, tier]);
-  return `0x${PREFIX_DISBURSEMENT}${payload.slice(2)}` as `0x${string}`;
+  const payload = encodeAbiParameters(ELIGIBILITY_REPORT_PARAMS, [requestId, recipients, tiers]);
+  return `0x${PREFIX_ELIGIBILITY}${payload.slice(2)}` as `0x${string}`;
 }
 
 // ── External data source checks ───────────────────────────────────────────
@@ -195,108 +204,51 @@ function applyConsensus(
   return votes >= 2;
 }
 
-// ── OPA + Instruxi Enforcer eligibility + tier check ─────────────────────
+// ── OPA eligibility check per recipient ──────────────────────────────────
 
 /**
- * Step 1: OPA policy authorizes the claim action.
- * Step 2: Fetch Instruxi Enforcer groups; extract tier from group name suffix
- *         (e.g. "Eligible:US-FLOOD-2026:US-CA:2" → tier 2).
+ * Check a single recipient's eligibility via OPA policy.
  *
- * Throws on 5xx / network errors so the DON retries instead of writing a
- * permanent denial. Returns { allowed: false, tier: 0 } only for definitive
- * 4xx / policy-denied / missing-group outcomes.
+ * Returns true if OPA approves. Throws on 5xx / 401 / 403 / network errors
+ * so the DON retries the entire eligibility batch rather than silently skipping.
+ * Returns false only on definitive 200 { allowed: false }.
  */
-function checkEligibilityAndTier(
+function checkRecipientEligibility(
   runtime: Runtime<WorkflowConfig>,
   recipient: string,
-  eventId: string
-): { allowed: boolean; tier: number } {
-  const { baseUrl, policyId, eligibilityGroupPrefix } = runtime.config.instruxi;
-  const secrets = runtime.secrets();
-  const apiKey  = (secrets["INSTRUXI_API_KEY"] as string) ?? "";
+  eventId: string,
+  apiKey: string
+): boolean {
+  const { baseUrl, policyId } = runtime.config.instruxi;
   const http = new cre.capabilities.HTTPCapability();
 
-  // Step 1: OPA policy check
-  runtime.log(`[Enforcer] OPA authorize: ${recipient} eventId=${eventId}`);
-  try {
-    const authRes = http.request(runtime, {
-      method: "POST",
-      url: `${baseUrl}/enforcer/auth/authorize`,
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        policy_id: policyId,
-        input: { action: "claim_disbursement", recipient, eventId },
-      }),
-    }).result();
+  runtime.log(`[OPA] Checking ${recipient} for eventId=${eventId}`);
 
-    // 5xx = transient server error — throw so the DON retries, not permanently denies
-    if (authRes.statusCode >= 500) {
-      throw new Error(`[Enforcer] OPA server error ${authRes.statusCode} — DON will retry`);
-    }
-    // 401/403 = bad or expired API key — throw so the misconfiguration surfaces, not silently denies everyone
-    if (authRes.statusCode === 401 || authRes.statusCode === 403) {
-      throw new Error(`[Enforcer] OPA auth error ${authRes.statusCode} — check INSTRUXI_API_KEY`);
-    }
+  const authRes = http.request(runtime, {
+    method: "POST",
+    url: `${baseUrl}/enforcer/auth/authorize`,
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+    },
+    body: JSON.stringify({
+      policy_id: policyId,
+      input: { action: "claim_disbursement", recipient, eventId },
+    }),
+  }).result();
 
-    const authBody = JSON.parse(authRes.body) as { allowed: boolean };
-    if (!authBody.allowed) {
-      runtime.log(`[Enforcer] OPA denied: ${recipient}`);
-      return { allowed: false, tier: 0 };
-    }
-  } catch (err) {
-    // Re-throw so the DON retries rather than writing a permanent denial
-    throw err instanceof Error ? err : new Error(String(err));
+  // 5xx = transient server error — throw so the DON retries
+  if (authRes.statusCode >= 500) {
+    throw new Error(`[OPA] Server error ${authRes.statusCode} for ${recipient} — DON will retry`);
+  }
+  // 401/403 = bad or expired API key — surface misconfiguration, not silent denial
+  if (authRes.statusCode === 401 || authRes.statusCode === 403) {
+    throw new Error(`[OPA] Auth error ${authRes.statusCode} — check INSTRUXI_API_KEY`);
   }
 
-  // Step 2: Fetch groups and extract tier from group name suffix
-  const url = `${baseUrl}/admin/groups/account/${recipient}/groups`;
-  runtime.log(`[Enforcer] GET ${url}`);
-  try {
-    const groupsRes = http.request(runtime, {
-      method: "GET",
-      url,
-      headers: {
-        Accept:      "application/json",
-        "x-api-key": apiKey,
-      },
-    }).result();
-
-    if (groupsRes.statusCode >= 500) {
-      throw new Error(`[Enforcer] Groups API server error ${groupsRes.statusCode} — DON will retry`);
-    }
-    if (groupsRes.statusCode === 401 || groupsRes.statusCode === 403) {
-      throw new Error(`[Enforcer] Groups API auth error ${groupsRes.statusCode} — check INSTRUXI_API_KEY`);
-    }
-
-    const groupsBody = JSON.parse(groupsRes.body) as { success?: boolean; data?: string[] };
-    if (!groupsBody.success || !Array.isArray(groupsBody.data)) {
-      runtime.log("[Enforcer] Could not fetch groups");
-      return { allowed: false, tier: 0 };
-    }
-
-    const eligibleGroup = groupsBody.data.find((g) => g.startsWith(eligibilityGroupPrefix));
-    if (!eligibleGroup) {
-      runtime.log(`[Enforcer] No group matching prefix "${eligibilityGroupPrefix}"`);
-      return { allowed: false, tier: 0 };
-    }
-
-    // Strict regex: require :[1-9]\d* at end of group name, bounded [1–255]
-    const m = eligibleGroup.match(/:([1-9]\d*)$/);
-    const tier = m ? parseInt(m[1], 10) : 0;
-    if (tier < 1 || tier > 255) {
-      runtime.log(`[Enforcer] Invalid tier in group "${eligibleGroup}" — must be [1-255]`);
-      return { allowed: false, tier: 0 };
-    }
-
-    runtime.log(`[Enforcer] Allowed, tier=${tier} (${eligibleGroup})`);
-    return { allowed: true, tier };
-  } catch (err) {
-    // Re-throw so the DON retries rather than writing a permanent denial
-    throw err instanceof Error ? err : new Error(String(err));
-  }
+  const authBody = JSON.parse(authRes.body) as { allowed: boolean };
+  runtime.log(`[OPA] ${recipient} → allowed=${authBody.allowed}`);
+  return authBody.allowed;
 }
 
 // ── Notify RWA Gateway via CRE webhook ────────────────────────────────────
@@ -310,11 +262,12 @@ function notifyGateway(
   runtime: Runtime<WorkflowConfig>,
   payload: {
     requestId: string;
-    requestType: "event_verification" | "disbursement";
+    requestType: "event_verification" | "eligibility_registration";
     txHash: string;
     result: boolean;
     eventId?: string;
-    recipient?: string;
+    approvedCount?: number;
+    totalCount?: number;
   }
 ): void {
   const rwGatewayUrl = runtime.config.instruxi.rwGatewayUrl;
@@ -425,48 +378,84 @@ function handleEventVerification(
   return `EventVerification: verified=${verified} tx=${txHash}`;
 }
 
-// ── Disbursement handler ──────────────────────────────────────────────────
+// ── Eligibility registration handler ─────────────────────────────────────
 
-function handleDisbursement(
+/**
+ * Validate a candidate eligibility batch via OPA. Only approved recipients
+ * are written onchain. This creates the onchain eligibility gate:
+ * _eligible[eventId][addr] = tier for each approved address.
+ *
+ * The admin provides the candidate list (from processRoster output).
+ * CRE — running on the Chainlink DON — independently validates each wallet
+ * via OPA before writing to the contract. The admin cannot directly set
+ * eligibility; only the CRE Forwarder (authorized fulfiller) can.
+ */
+function handleEligibilityRegistration(
   runtime: Runtime<WorkflowConfig>,
   requestId: `0x${string}`,
   requestData: `0x${string}`
 ): string {
-  runtime.log("── Disbursement OPA + Tier Check ───────────────────────");
+  runtime.log("── Eligibility Registration ─────────────────────────────");
 
-  let recipient = "";
-  let decodedEventId = "";
+  let eventId   = "";
+  let candidates: readonly unknown[] = [];
+  let claimedTiers: readonly unknown[] = [];
 
   try {
-    const [evId, addr] = decodeAbiParameters(DISBURSEMENT_PARAMS, requestData);
-    decodedEventId = evId as string;
-    recipient = addr as string;
-    runtime.log(`[Step 2] recipient: ${recipient} eventId: ${decodedEventId}`);
+    const [evId, recipients, tiers] = decodeAbiParameters(ELIGIBILITY_PARAMS, requestData);
+    eventId      = evId as string;
+    candidates   = recipients as readonly unknown[];
+    claimedTiers = tiers     as readonly unknown[];
+    runtime.log(`[Step 1] eventId=${eventId} candidates=${candidates.length}`);
   } catch (err) {
-    // Corrupted requestData is unresolvable — throw so the DON retries rather than
-    // writing a permanent denial for a request that can't be decoded
-    runtime.log(`[Step 2] Decode error: ${err} — throwing so DON can retry`);
+    // Corrupted requestData is unresolvable — throw so the DON retries
+    runtime.log(`[Step 1] Decode error: ${err} — throwing so DON can retry`);
     throw err instanceof Error ? err : new Error(String(err));
   }
 
-  const { allowed, tier } = checkEligibilityAndTier(runtime, recipient, decodedEventId);
-  runtime.log(`[Result] allowed=${allowed} tier=${tier}`);
+  const secrets = runtime.secrets();
+  const apiKey  = (secrets["INSTRUXI_API_KEY"] as string) ?? "";
 
-  const report = encodeDisbursementReport(requestId, allowed, tier);
+  const approvedRecipients: `0x${string}`[] = [];
+  const approvedTiers: number[] = [];
+
+  runtime.log(`[Step 2] OPA-validating ${candidates.length} candidates...`);
+  for (let i = 0; i < candidates.length; i++) {
+    const addr = candidates[i] as string;
+    const tier = claimedTiers[i] as number;
+
+    // Validate tier is in [1, 255]
+    if (tier < 1 || tier > 255) {
+      runtime.log(`[OPA] Skipping ${addr}: invalid tier=${tier}`);
+      continue;
+    }
+
+    // OPA check: does this wallet have the claimed eligibility for this event?
+    // Throws on 5xx/auth errors → DON retries entire batch.
+    if (checkRecipientEligibility(runtime, addr, eventId, apiKey)) {
+      approvedRecipients.push(addr as `0x${string}`);
+      approvedTiers.push(tier);
+    }
+  }
+
+  runtime.log(`[Result] approved=${approvedRecipients.length}/${candidates.length}`);
+
+  const report = encodeEligibilityReport(requestId, approvedRecipients, approvedTiers);
   const txHash = writeReport(runtime, report);
   runtime.log(`[Write] ✓ tx=${txHash}`);
 
-  // Notify RWA Gateway — triggers TrustSync proof-of-disbursement attestation
+  // Notify RWA Gateway — triggers TrustSync eligibility attestation
   notifyGateway(runtime, {
     requestId,
-    requestType: "disbursement",
+    requestType: "eligibility_registration",
     txHash,
-    result: allowed,
-    eventId:   decodedEventId,
-    recipient,
+    result: approvedRecipients.length > 0,
+    eventId,
+    approvedCount: approvedRecipients.length,
+    totalCount:    candidates.length,
   });
 
-  return `Disbursement: allowed=${allowed} tier=${tier} tx=${txHash}`;
+  return `EligibilityRegistration: ${approvedRecipients.length}/${candidates.length} approved tx=${txHash}`;
 }
 
 // ── Main log trigger callback ─────────────────────────────────────────────
@@ -501,8 +490,8 @@ export function onRequestSent(runtime: Runtime<WorkflowConfig>, log: EVMLog): st
     return handleEventVerification(runtime, requestId, requestData);
   }
 
-  if (requestType === "disbursement") {
-    return handleDisbursement(runtime, requestId, requestData);
+  if (requestType === "eligibility_registration") {
+    return handleEligibilityRegistration(runtime, requestId, requestData);
   }
 
   runtime.log(`Unknown requestType "${requestType}" — no-op`);

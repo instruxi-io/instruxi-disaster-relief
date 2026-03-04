@@ -15,10 +15,18 @@ function encodeEventVerificationReport(requestId: string, verified: boolean): st
   return "0x01" + payload.slice(2);
 }
 
-function encodeDisbursementReport(requestId: string, allowed: boolean, tier: number): string {
+/**
+ * Encode an eligibility registration report: prefix 0x02 + abi.encode(requestId, address[], uint8[])
+ * CRE calls this after OPA-validating the candidate batch and returns only approved recipients.
+ */
+function encodeEligibilityReport(
+  requestId: string,
+  recipients: string[],
+  tiers: number[]
+): string {
   const payload = ethers.AbiCoder.defaultAbiCoder().encode(
-    ["bytes32", "bool", "uint8"],
-    [requestId, allowed, tier]
+    ["bytes32", "address[]", "uint8[]"],
+    [requestId, recipients, tiers]
   );
   return "0x02" + payload.slice(2);
 }
@@ -58,6 +66,16 @@ async function deployFixture() {
     EVENT_ID, PER_EVENT_CAP, PER_RECIPIENT_CAP, PROGRAM_CAP,
     TIERS, AMOUNTS,
   };
+}
+
+// Helper: extract requestId from RequestSent event in a tx receipt
+async function extractRequestId(treasury: ReliefTreasury, tx: any): Promise<string> {
+  const receipt = await tx.wait();
+  const iface = treasury.interface;
+  const log = receipt!.logs
+    .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
+    .find((l: any) => l?.name === "RequestSent");
+  return log!.args.requestId;
 }
 
 // ── Test Suite ────────────────────────────────────────────────────────────────
@@ -170,15 +188,11 @@ describe("ReliefTreasury", function () {
       const { treasury, admin, fulfiller, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
       await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
       const ref = JSON.stringify({ usgsId: "us7000abc", region: "US" });
-      const tx = await treasury.connect(admin).requestEventVerification(EVENT_ID, ref);
-      const receipt = await tx.wait();
+      const requestId = await extractRequestId(
+        treasury,
+        await treasury.connect(admin).requestEventVerification(EVENT_ID, ref)
+      );
 
-      const iface = treasury.interface;
-      const requestSentLog = receipt!.logs
-        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
-        .find((l: any) => l?.name === "RequestSent");
-
-      const requestId = requestSentLog!.args.requestId;
       await expect(
         treasury.connect(fulfiller).onReport("0x", encodeEventVerificationReport(requestId, true))
       ).to.emit(treasury, "EventVerified").withArgs(EVENT_ID);
@@ -233,46 +247,142 @@ describe("ReliefTreasury", function () {
     });
   });
 
+  // ── Eligibility Registration (CRE) ──────────────────────────────────────
+
+  describe("Eligibility Registration (CRE)", function () {
+    async function registeredEventFixture() {
+      const ctx = await deployFixture();
+      const { treasury, admin, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = ctx;
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      return ctx;
+    }
+
+    it("requestEligibilityRegistration emits RequestSent and EligibilityRegistrationRequested", async function () {
+      const { treasury, admin, fulfiller, recipient, EVENT_ID } = await registeredEventFixture();
+
+      await expect(
+        treasury.connect(admin).requestEligibilityRegistration(
+          EVENT_ID, [recipient.address], [1]
+        )
+      )
+        .to.emit(treasury, "EligibilityRegistrationRequested")
+        .to.emit(treasury, "RequestSent");
+    });
+
+    it("CRE fulfiller writes eligibility onchain via onReport", async function () {
+      const { treasury, admin, fulfiller, recipient, EVENT_ID } = await registeredEventFixture();
+
+      const requestId = await extractRequestId(
+        treasury,
+        await treasury.connect(admin).requestEligibilityRegistration(
+          EVENT_ID, [recipient.address], [1]
+        )
+      );
+
+      await expect(
+        treasury.connect(fulfiller).onReport(
+          "0x",
+          encodeEligibilityReport(requestId, [recipient.address], [1])
+        )
+      )
+        .to.emit(treasury, "EligibilitySet")
+        .withArgs(EVENT_ID, recipient.address, 1);
+
+      expect(await treasury.getEligibilityTier(EVENT_ID, recipient.address)).to.equal(1);
+    });
+
+    it("CRE may approve a subset of the candidate batch (OPA filtering)", async function () {
+      const { treasury, admin, fulfiller, recipient, other, EVENT_ID } = await registeredEventFixture();
+
+      // Admin submits two candidates; CRE approves only recipient (OPA denied 'other')
+      const requestId = await extractRequestId(
+        treasury,
+        await treasury.connect(admin).requestEligibilityRegistration(
+          EVENT_ID, [recipient.address, other.address], [1, 2]
+        )
+      );
+
+      // CRE writes back only the approved recipient
+      await treasury.connect(fulfiller).onReport(
+        "0x",
+        encodeEligibilityReport(requestId, [recipient.address], [1])
+      );
+
+      expect(await treasury.getEligibilityTier(EVENT_ID, recipient.address)).to.equal(1);
+      expect(await treasury.getEligibilityTier(EVENT_ID, other.address)).to.equal(0); // not set
+    });
+
+    it("reverts requestEligibilityRegistration for unregistered event", async function () {
+      const { treasury, admin, recipient } = await deployFixture();
+      const unknownEvent = ethers.keccak256(ethers.toUtf8Bytes("UNKNOWN"));
+      await expect(
+        treasury.connect(admin).requestEligibilityRegistration(
+          unknownEvent, [recipient.address], [1]
+        )
+      ).to.be.revertedWithCustomError(treasury, "EventNotFound");
+    });
+
+    it("reverts requestEligibilityRegistration from non-admin", async function () {
+      const { treasury, other, recipient, EVENT_ID } = await registeredEventFixture();
+      await expect(
+        treasury.connect(other).requestEligibilityRegistration(
+          EVENT_ID, [recipient.address], [1]
+        )
+      ).to.be.reverted;
+    });
+  });
+
   // ── Full Disbursement Flow ───────────────────────────────────────────────
 
   describe("Disbursement (Pull Model)", function () {
+    /**
+     * Full pipeline fixture:
+     *  1. Register event + tiers
+     *  2. CRE verifies disaster
+     *  3. Admin activates event
+     *  4. Admin requests eligibility registration (recipient=tier 1, other=tier 2)
+     *  5. CRE writes eligibility onchain
+     */
     async function activeEventFixture() {
       const ctx = await deployFixture();
-      const { treasury, usdc, admin, fulfiller, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = ctx;
+      const { treasury, usdc, admin, fulfiller, recipient, other, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = ctx;
 
       await treasury.connect(admin).deposit(USDC(10_000));
-
-      // Tier amounts committed atomically at registration
       await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
 
-      const ref = JSON.stringify({ usgsId: "us7000abc", region: "US" });
-      const tx = await treasury.connect(admin).requestEventVerification(EVENT_ID, ref);
-      const receipt = await tx.wait();
-      const iface = treasury.interface;
-      const requestSentLog = receipt!.logs
-        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
-        .find((l: any) => l?.name === "RequestSent");
-      const requestId = requestSentLog!.args.requestId;
-
-      await treasury.connect(fulfiller).onReport("0x", encodeEventVerificationReport(requestId, true));
+      // Step 1: CRE verifies the disaster event
+      const verifyRequestId = await extractRequestId(
+        treasury,
+        await treasury.connect(admin).requestEventVerification(
+          EVENT_ID, JSON.stringify({ usgsId: "us7000abc", region: "US" })
+        )
+      );
+      await treasury.connect(fulfiller).onReport("0x", encodeEventVerificationReport(verifyRequestId, true));
       await treasury.connect(admin).activateEvent(EVENT_ID);
+
+      // Step 2: CRE sets eligibility for both test recipients
+      const eligRequestId = await extractRequestId(
+        treasury,
+        await treasury.connect(admin).requestEligibilityRegistration(
+          EVENT_ID,
+          [recipient.address, other.address],
+          [1, 2]
+        )
+      );
+      await treasury.connect(fulfiller).onReport(
+        "0x",
+        encodeEligibilityReport(eligRequestId, [recipient.address, other.address], [1, 2])
+      );
 
       return { ...ctx, addr: await treasury.getAddress() };
     }
 
     it("tier 1 recipient receives standard amount ($50)", async function () {
-      const { treasury, usdc, fulfiller, recipient, EVENT_ID } = await activeEventFixture();
+      const { treasury, usdc, recipient, EVENT_ID } = await activeEventFixture();
 
       const balanceBefore = await usdc.balanceOf(recipient.address);
-      const tx = await treasury.connect(recipient).claimDisbursement(EVENT_ID);
-      const receipt = await tx.wait();
-      const iface = treasury.interface;
-      const requestSentLog = receipt!.logs
-        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
-        .find((l: any) => l?.name === "RequestSent");
-      const requestId = requestSentLog!.args.requestId;
 
-      await expect(treasury.connect(fulfiller).onReport("0x", encodeDisbursementReport(requestId, true, 1)))
+      await expect(treasury.connect(recipient).claimDisbursement(EVENT_ID))
         .to.emit(treasury, "Disbursed")
         .withArgs(EVENT_ID, recipient.address, USDC(50));
 
@@ -281,93 +391,22 @@ describe("ReliefTreasury", function () {
     });
 
     it("tier 2 recipient receives priority amount ($100)", async function () {
-      const { treasury, usdc, fulfiller, other, EVENT_ID } = await activeEventFixture();
+      const { treasury, usdc, other, EVENT_ID } = await activeEventFixture();
 
       const balanceBefore = await usdc.balanceOf(other.address);
-      const tx = await treasury.connect(other).claimDisbursement(EVENT_ID);
-      const receipt = await tx.wait();
-      const iface = treasury.interface;
-      const requestSentLog = receipt!.logs
-        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
-        .find((l: any) => l?.name === "RequestSent");
-      const requestId = requestSentLog!.args.requestId;
 
-      await expect(treasury.connect(fulfiller).onReport("0x", encodeDisbursementReport(requestId, true, 2)))
+      await expect(treasury.connect(other).claimDisbursement(EVENT_ID))
         .to.emit(treasury, "Disbursed")
         .withArgs(EVENT_ID, other.address, USDC(100));
 
       expect(await usdc.balanceOf(other.address)).to.equal(balanceBefore + USDC(100));
     });
 
-    it("CRE returns allowed=false → no transfer", async function () {
-      const { treasury, usdc, fulfiller, recipient, EVENT_ID } = await activeEventFixture();
-
-      const balanceBefore = await usdc.balanceOf(recipient.address);
-      const tx = await treasury.connect(recipient).claimDisbursement(EVENT_ID);
-      const receipt = await tx.wait();
-      const iface = treasury.interface;
-      const requestSentLog = receipt!.logs
-        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
-        .find((l: any) => l?.name === "RequestSent");
-      const requestId = requestSentLog!.args.requestId;
-
-      await treasury.connect(fulfiller).onReport("0x", encodeDisbursementReport(requestId, false, 0));
-      expect(await usdc.balanceOf(recipient.address)).to.equal(balanceBefore);
-    });
-
-    it("unconfigured tier in CRE callback — no transfer, no revert", async function () {
-      const { treasury, usdc, fulfiller, recipient, EVENT_ID } = await activeEventFixture();
-
-      const balanceBefore = await usdc.balanceOf(recipient.address);
-      const tx = await treasury.connect(recipient).claimDisbursement(EVENT_ID);
-      const receipt = await tx.wait();
-      const iface = treasury.interface;
-      const requestSentLog = receipt!.logs
-        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
-        .find((l: any) => l?.name === "RequestSent");
-      const requestId = requestSentLog!.args.requestId;
-
-      // Tier 3 has no amount configured — callback must not revert; no transfer
-      await expect(
-        treasury.connect(fulfiller).onReport("0x", encodeDisbursementReport(requestId, true, 3))
-      ).not.to.be.reverted;
-      expect(await usdc.balanceOf(recipient.address)).to.equal(balanceBefore);
-    });
-
-    it("prevents double-claim by same recipient", async function () {
-      const { treasury, fulfiller, recipient, EVENT_ID } = await activeEventFixture();
-
-      const tx = await treasury.connect(recipient).claimDisbursement(EVENT_ID);
-      const receipt = await tx.wait();
-      const iface = treasury.interface;
-      const requestSentLog = receipt!.logs
-        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
-        .find((l: any) => l?.name === "RequestSent");
-      const requestId = requestSentLog!.args.requestId;
-
-      await treasury.connect(fulfiller).onReport("0x", encodeDisbursementReport(requestId, true, 1));
-      await expect(
-        treasury.connect(recipient).claimDisbursement(EVENT_ID)
-      ).to.be.revertedWithCustomError(treasury, "AlreadyClaimed");
-    });
-
-    it("any recipient receives payment if CRE approves (no onchain eligibility gate)", async function () {
-      const { treasury, usdc, fulfiller, other, EVENT_ID } = await activeEventFixture();
-
-      const balanceBefore = await usdc.balanceOf(other.address);
-      const tx = await treasury.connect(other).claimDisbursement(EVENT_ID);
-      const receipt = await tx.wait();
-      const iface = treasury.interface;
-      const requestSentLog = receipt!.logs
-        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
-        .find((l: any) => l?.name === "RequestSent");
-      const requestId = requestSentLog!.args.requestId;
-
-      await expect(treasury.connect(fulfiller).onReport("0x", encodeDisbursementReport(requestId, true, 1)))
-        .to.emit(treasury, "Disbursed")
-        .withArgs(EVENT_ID, other.address, USDC(50));
-
-      expect(await usdc.balanceOf(other.address)).to.equal(balanceBefore + USDC(50));
+    it("reverts if CRE has not set eligibility (wallet not in batch)", async function () {
+      const { treasury, deployer, EVENT_ID } = await activeEventFixture();
+      // deployer was not in the eligibility batch
+      await expect(treasury.connect(deployer).claimDisbursement(EVENT_ID))
+        .to.be.revertedWithCustomError(treasury, "NotEligible");
     });
 
     it("reverts claim when event is not Active", async function () {
@@ -377,7 +416,16 @@ describe("ReliefTreasury", function () {
       ).to.be.revertedWithCustomError(treasury, "EventNotActive");
     });
 
-    it("cap exceeded — CRE callback completes without reverting", async function () {
+    it("prevents double-claim by same recipient", async function () {
+      const { treasury, recipient, EVENT_ID } = await activeEventFixture();
+
+      await treasury.connect(recipient).claimDisbursement(EVENT_ID);
+      await expect(
+        treasury.connect(recipient).claimDisbursement(EVENT_ID)
+      ).to.be.revertedWithCustomError(treasury, "AlreadyClaimed");
+    });
+
+    it("enforces per-event cap — reverts when cap exceeded", async function () {
       const [, admin2, fulfiller2, r1, r2] = await ethers.getSigners();
 
       const MockUSDC = await ethers.getContractFactory("MockUSDC");
@@ -398,65 +446,82 @@ describe("ReliefTreasury", function () {
       // tier 2 = $60 (≤ perRecipientCap of $60)
       await treasury.connect(admin2).registerEvent(eventId, USDC(100), [1, 2], [50_000_000n, 60_000_000n]);
 
-      const ref = "{}";
-      const verifyTx = await treasury.connect(admin2).requestEventVerification(eventId, ref);
-      const verifyReceipt = await verifyTx.wait();
+      // Verify event
       const iface = treasury.interface;
+      const verifyTx = await treasury.connect(admin2).requestEventVerification(eventId, "{}");
+      const verifyReceipt = await verifyTx.wait();
       const vLog = verifyReceipt!.logs
         .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
         .find((l: any) => l?.name === "RequestSent");
       await treasury.connect(fulfiller2).onReport("0x", encodeEventVerificationReport(vLog!.args.requestId, true));
       await treasury.connect(admin2).activateEvent(eventId);
 
-      // r1 claims tier 2 ($60) — fills the $100 event cap (only $40 remains after)
-      const claimTx1 = await treasury.connect(r1).claimDisbursement(eventId);
-      const cLog1 = (await claimTx1.wait())!.logs
+      // Register eligibility for both recipients (tier 2 = $60)
+      const eligTx = await treasury.connect(admin2).requestEligibilityRegistration(
+        eventId, [r1.address, r2.address], [2, 2]
+      );
+      const eligReceipt = await eligTx.wait();
+      const eLogs = eligReceipt!.logs
         .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
         .find((l: any) => l?.name === "RequestSent");
-      await treasury.connect(fulfiller2).onReport("0x", encodeDisbursementReport(cLog1!.args.requestId, true, 2));
+      await treasury.connect(fulfiller2).onReport(
+        "0x",
+        encodeEligibilityReport(eLogs!.args.requestId, [r1.address, r2.address], [2, 2])
+      );
 
-      const r2BalanceBefore = await usdc.balanceOf(r2.address);
+      // r1 claims $60 — fills most of the $100 event cap ($40 remains)
+      await treasury.connect(r1).claimDisbursement(eventId);
 
-      // r2 tries tier 2 ($60) but only $40 remains in per-event cap
-      // Callback must NOT revert — graceful return, no Disbursed event
-      const claimTx2 = await treasury.connect(r2).claimDisbursement(eventId);
-      const cLog2 = (await claimTx2.wait())!.logs
-        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
-        .find((l: any) => l?.name === "RequestSent");
-      await expect(
-        treasury.connect(fulfiller2).onReport("0x", encodeDisbursementReport(cLog2!.args.requestId, true, 2))
-      ).not.to.emit(treasury, "Disbursed");
-
-      // r2 receives nothing
-      expect(await usdc.balanceOf(r2.address)).to.equal(r2BalanceBefore);
+      // r2 tries $60 but only $40 remains → PerEventCapExceeded
+      await expect(treasury.connect(r2).claimDisbursement(eventId))
+        .to.be.revertedWithCustomError(treasury, "PerEventCapExceeded");
     });
 
-    it("pending guard prevents double-submission before CRE callback", async function () {
-      const { treasury, recipient, EVENT_ID } = await activeEventFixture();
-      await treasury.connect(recipient).claimDisbursement(EVENT_ID);
-      // Second call before callback should revert with PendingRequestExists
-      await expect(treasury.connect(recipient).claimDisbursement(EVENT_ID))
-        .to.be.revertedWithCustomError(treasury, "PendingRequestExists");
-    });
+    it("unconfigured tier — CRE sets eligible but tier has no amount → TierNotConfigured", async function () {
+      const [, admin3, fulfiller3, r3] = await ethers.getSigners();
 
-    it("pending guard is cleared after CRE denial — retry is allowed", async function () {
-      const { treasury, fulfiller, recipient, EVENT_ID } = await activeEventFixture();
-      const tx = await treasury.connect(recipient).claimDisbursement(EVENT_ID);
-      const receipt = await tx.wait();
-      const iface = treasury.interface;
-      const requestSentLog = receipt!.logs
+      const MockUSDC = await ethers.getContractFactory("MockUSDC");
+      const usdc3 = (await MockUSDC.deploy()) as unknown as MockUSDC;
+
+      const ReliefTreasury = await ethers.getContractFactory("ReliefTreasury");
+      const treasury3 = (await ReliefTreasury.deploy(
+        await usdc3.getAddress(), USDC(100), USDC(1_000), admin3.address
+      )) as unknown as ReliefTreasury;
+
+      await treasury3.connect(admin3).setFulfillerAuthorization(fulfiller3.address, true);
+      await usdc3.mint(admin3.address, USDC(1_000));
+      await usdc3.connect(admin3).approve(await treasury3.getAddress(), USDC(1_000));
+      await treasury3.connect(admin3).deposit(USDC(1_000));
+
+      const eventId = ethers.keccak256(ethers.toUtf8Bytes("TIER-TEST"));
+      // Only tier 1 configured — no tier 3
+      await treasury3.connect(admin3).registerEvent(eventId, USDC(1_000), [1], [50_000_000n]);
+
+      const iface = treasury3.interface;
+      const verifyTx = await treasury3.connect(admin3).requestEventVerification(eventId, "{}");
+      const verifyReceipt = await verifyTx.wait();
+      const vLog = verifyReceipt!.logs
         .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
         .find((l: any) => l?.name === "RequestSent");
-      const requestId = requestSentLog!.args.requestId;
+      await treasury3.connect(fulfiller3).onReport("0x", encodeEventVerificationReport(vLog!.args.requestId, true));
+      await treasury3.connect(admin3).activateEvent(eventId);
 
-      // CRE denies — PendingRequestCleared must be emitted so offchain indexers track state
-      await expect(
-        treasury.connect(fulfiller).onReport("0x", encodeDisbursementReport(requestId, false, 1))
-      ).to.emit(treasury, "PendingRequestCleared").withArgs(EVENT_ID, recipient.address);
+      // CRE sets r3 as eligible at tier 3 (which has no configured amount)
+      const eligTx = await treasury3.connect(admin3).requestEligibilityRegistration(
+        eventId, [r3.address], [3]
+      );
+      const eligReceipt = await eligTx.wait();
+      const eLogs = eligReceipt!.logs
+        .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
+        .find((l: any) => l?.name === "RequestSent");
+      await treasury3.connect(fulfiller3).onReport(
+        "0x",
+        encodeEligibilityReport(eLogs!.args.requestId, [r3.address], [3])
+      );
 
-      // Pending cleared — recipient can retry
-      await expect(treasury.connect(recipient).claimDisbursement(EVENT_ID))
-        .not.to.be.revertedWithCustomError(treasury, "PendingRequestExists");
+      // Claim should revert TierNotConfigured (tier 3 has no amount)
+      await expect(treasury3.connect(r3).claimDisbursement(eventId))
+        .to.be.revertedWithCustomError(treasury3, "TierNotConfigured");
     });
   });
 

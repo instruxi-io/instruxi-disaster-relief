@@ -3,6 +3,8 @@
 Step-by-step checklist to go from zero to a live Sepolia deployment with CRE simulation evidence.
 
 > **Deployment scope:** This guide targets a Sepolia testnet deployment with a single admin wallet. These are intentional scope decisions — the contract architecture is fully compatible with a Gnosis Safe + TimelockController without code changes. See [Design Decisions](README.md#design-decisions) and [Known Limitations](README.md#known-limitations) in the README for the rationale and production upgrade path for each choice.
+>
+> **Two CRE pipelines:** This deployment runs two distinct CRE workflows — `event_verification` (disaster confirmation via USGS/GDACS/ReliefWeb 2-of-3) and `eligibility_registration` (OPA validation of recipient batch, writes `_eligible` onchain). Both emit `RequestSent` on the same contract; the CRE workflow routes by `requestType`. Disbursement is then synchronous — no CRE round-trip at claim time.
 
 ---
 
@@ -272,6 +274,27 @@ npx hardhat activate-event --network sepolia \
 
 ---
 
+## Step 10b — CRE Pipeline 2: Register Eligibility Onchain
+
+After activating the event, submit the eligible wallets (from processRoster output) to CRE for OPA validation. CRE validates each wallet and writes `_eligible[eventId][addr] = tier` onchain.
+
+```bash
+# Submit candidate eligibility batch to CRE
+# --recipients is a comma-separated list of wallet addresses from processRoster output
+# --tiers is the corresponding tier for each wallet (1=standard, 2=priority)
+npx hardhat request-eligibility --network sepolia \
+  --contract 0x<CONTRACT_ADDRESS> \
+  --eventid 0xfe3dfcfbd3a3040c4882787cfb0471a41ce91cc9e728b73d68b1b44ae8789477 \
+  --recipients "0xAddr1,0xAddr2,0xAddr3" \
+  --tiers "1,1,2"
+```
+
+This emits `RequestSent("eligibility_registration", ...)` → CRE picks it up → validates each wallet via OPA → writes back `onReport(0x02 + encode(requestId, approvedAddrs[], tiers[]))` → `EligibilitySet(eventId, recipient, tier)` emitted for each approved wallet.
+
+**Save the CRE simulation output for this step** — it shows the eligibility pipeline running and the onchain write. Judges can verify `EligibilitySet` events on Etherscan.
+
+---
+
 ## Step 11 — Proof-of-Funds Attestation
 
 After depositing USDC into the treasury:
@@ -298,11 +321,12 @@ npm run attest -- proof-of-funds \
 
 Record a walkthrough covering:
 - [ ] Deployed contract on Sepolia Etherscan
-- [ ] CRE simulation terminal output
+- [ ] CRE Pipeline 1 simulation: `event_verification` terminal output (USGS/GDACS/ReliefWeb 2-of-3, `EventVerified` tx on Etherscan)
 - [ ] `npm run setup-groups` running (tier-suffixed groups `:1`, `:2`)
 - [ ] `npm run upload-roster` + `process-roster` running
-- [ ] `anchor-roster` tx visible on Etherscan (RosterAnchored event)
-- [ ] `claimDisbursement` → CRE callback → USDC transfer on Etherscan
+- [ ] `anchor-roster` tx visible on Etherscan (`RosterAnchored` event)
+- [ ] CRE Pipeline 2 simulation: `eligibility_registration` terminal output (`EligibilitySet` events on Etherscan showing CRE wrote the onchain eligibility gate)
+- [ ] `claimDisbursement` → direct USDC transfer on Etherscan (no CRE round-trip at claim time)
 - [ ] TrustSync attestation visible in Instruxi dashboard
 
 ---

@@ -40,8 +40,13 @@ interface IReliefTreasury {
     /// @dev Anyone can verify transparency: hash the original CSV and compare to this event.
     event RosterAnchored(bytes32 indexed rosterHash, bytes32 indexed eventId, string program, string region);
 
-    event DisbursementRequested(bytes32 indexed requestId, bytes32 indexed eventId, address indexed recipient);
-    event PendingRequestCleared(bytes32 indexed eventId, address indexed recipient);
+    /// @notice Emitted when admin submits an eligibility batch to CRE for validation.
+    event EligibilityRegistrationRequested(bytes32 indexed requestId, bytes32 indexed eventId);
+
+    /// @notice Emitted by CRE fulfiller for each recipient whose eligibility is confirmed onchain.
+    /// @dev tier is the payout tier (1-255). tier=0 is never emitted (means not eligible).
+    event EligibilitySet(bytes32 indexed eventId, address indexed recipient, uint8 tier);
+
     event Disbursed(bytes32 indexed eventId, address indexed recipient, uint256 amount);
     event DeliveryConfirmed(bytes32 indexed eventId, address indexed recipient);
     event EmergencyWithdraw(address indexed to, uint256 amount);
@@ -54,7 +59,7 @@ interface IReliefTreasury {
     error EventNotFound(bytes32 eventId);
     error EventNotActive(bytes32 eventId);
     error AlreadyClaimed(bytes32 eventId, address recipient);
-    error PendingRequestExists(bytes32 eventId, address recipient);
+    error NotEligible(bytes32 eventId, address recipient);
     error TierNotConfigured(uint8 tier);
     error PerEventCapExceeded(uint256 available, uint256 requested);
     error ProgramCapExceeded(uint256 available, uint256 requested);
@@ -105,10 +110,30 @@ interface IReliefTreasury {
     ) external;
 
     // ================================================================
+    //                 ELIGIBILITY REGISTRATION (CRE)
+    // ================================================================
+
+    /// @notice Admin submits a candidate eligibility batch to CRE for OPA validation.
+    /// @dev Emits RequestSent to trigger the CRE eligibility_registration workflow.
+    ///      CRE validates each recipient via OPA policy and calls back via onReport()
+    ///      with only the approved recipients — writing _eligible[eventId][addr] = tier.
+    /// @param eventId    The event this eligibility batch belongs to
+    /// @param recipients Candidate wallet addresses (from processRoster output)
+    /// @param tiers      Claimed payout tier for each recipient (1-255)
+    function requestEligibilityRegistration(
+        bytes32 eventId,
+        address[] calldata recipients,
+        uint8[] calldata tiers
+    ) external returns (bytes32 requestId);
+
+    // ================================================================
     //                    CLAIM (PULL MODEL)
     // ================================================================
 
-    function claimDisbursement(bytes32 eventId) external returns (bytes32 requestId);
+    /// @notice Recipient claims disbursement. Synchronous — no CRE callback.
+    /// @dev Requires CRE to have set eligibility onchain via requestEligibilityRegistration.
+    ///      Reverts if recipient is not eligible, already claimed, or event is not Active.
+    function claimDisbursement(bytes32 eventId) external;
 
     // ================================================================
     //                    CRE CALLBACKS
@@ -146,6 +171,9 @@ interface IReliefTreasury {
 
     /// @notice Returns the USDC payout amount for a given tier within a specific event.
     function getEventTierAmount(bytes32 eventId, uint8 tier) external view returns (uint256);
+
+    /// @notice Returns the CRE-assigned payout tier for a recipient (0 = not eligible).
+    function getEligibilityTier(bytes32 eventId, address recipient) external view returns (uint8);
 
     function hasClaimed(bytes32 eventId, address recipient) external view returns (bool);
 
