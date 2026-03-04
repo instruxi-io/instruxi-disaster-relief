@@ -26,6 +26,9 @@ interface IReliefTreasury {
 
     event Deposited(address indexed depositor, uint256 amount);
 
+    /// @notice Emitted when a CRE request is sent (EVM Log Trigger listens for this)
+    event RequestSent(bytes32 indexed requestId, address indexed requester, string requestType, bytes requestData);
+
     /// @notice Emitted when a disaster event is registered.
     /// @dev tiers and amounts are locked at registration and cannot be changed —
     ///      this event is the onchain commitment the funding org makes upfront.
@@ -140,10 +143,6 @@ interface IReliefTreasury {
     // ================================================================
 
     function onReport(bytes calldata metadata, bytes calldata report) external;
-
-    function fulfillRequest(bytes32 requestId, bytes calldata responseData) external;
-
-    function cancelRequest(bytes32 requestId) external;
 
     // ================================================================
     //                    PROOF OF DELIVERY

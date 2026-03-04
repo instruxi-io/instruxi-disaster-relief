@@ -582,24 +582,6 @@ describe("ReliefTreasury", function () {
       expect(await treasury.totalDeposited()).to.equal(0n);
     });
 
-    it("setRequestTimeout reverts outside [1 day, 30 days] bounds", async function () {
-      const { treasury, admin } = await deployFixture();
-      const DAY = 24 * 60 * 60;
-      // Below minimum (< 1 day) — base contract reverts InvalidTimeout
-      await expect(treasury.connect(admin).setRequestTimeout(0))
-        .to.be.revertedWithCustomError(treasury, "InvalidTimeout");
-      await expect(treasury.connect(admin).setRequestTimeout(DAY - 1))
-        .to.be.revertedWithCustomError(treasury, "InvalidTimeout");
-      // Above maximum (> 30 days)
-      await expect(treasury.connect(admin).setRequestTimeout(31 * DAY))
-        .to.be.revertedWithCustomError(treasury, "InvalidTimeout");
-      // Valid values — no revert
-      await expect(treasury.connect(admin).setRequestTimeout(DAY))
-        .not.to.be.reverted;
-      await expect(treasury.connect(admin).setRequestTimeout(7 * DAY))
-        .not.to.be.reverted;
-    });
-
     it("reverts emergency withdraw when not paused", async function () {
       const { treasury, admin, other } = await deployFixture();
       await treasury.connect(admin).deposit(USDC(100));
@@ -620,12 +602,5 @@ describe("ReliefTreasury", function () {
       ).to.be.revertedWithCustomError(treasury, "UnauthorizedFulfiller");
     });
 
-    it("fulfillRequest reverts from unauthorized caller", async function () {
-      const { treasury, other } = await deployFixture();
-      const requestId = ethers.randomBytes(32);
-      await expect(
-        treasury.connect(other).fulfillRequest(requestId, "0x")
-      ).to.be.revertedWithCustomError(treasury, "UnauthorizedFulfiller");
-    });
   });
 });

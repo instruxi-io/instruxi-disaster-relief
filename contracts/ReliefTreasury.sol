@@ -6,8 +6,9 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {ChainlinkCREClient} from "./utils/ChainlinkCREClient.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {IReliefTreasury} from "./interfaces/IReliefTreasury.sol";
+import {IReceiver} from "./interfaces/IReceiver.sol";
 
 /**
  * @title ReliefTreasury
@@ -15,8 +16,8 @@ import {IReliefTreasury} from "./interfaces/IReliefTreasury.sol";
  *
  * @dev Architecture:
  *   - Holds USDC and is the final enforcement point for all monetary safety guarantees.
- *   - Inherits ChainlinkCREClient to emit RequestSent events (request side).
- *   - Implements onReport() as the CRE write target (fulfill side via Chainlink Forwarder).
+ *   - Implements IReceiver (standard Chainlink CRE interface) to receive workflow results.
+ *   - Emits RequestSent events to trigger CRE workflows (EVM Log Trigger).
  *   - No offchain component — including Chainlink CRE — can over-transfer funds or
  *     bypass onchain invariants.
  *
@@ -56,7 +57,7 @@ import {IReliefTreasury} from "./interfaces/IReliefTreasury.sol";
  *   0x01 = event_verification result:       abi.encode(bytes32 requestId, bool verified)
  *   0x02 = eligibility_registration result: abi.encode(bytes32 requestId, address[] recipients, uint8[] tiers)
  */
-contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, Pausable, ReentrancyGuard {
+contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ================================================================
@@ -73,10 +74,6 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     string public constant REQUEST_TYPE_EVENT_VERIFICATION = "event_verification";
     string public constant REQUEST_TYPE_ELIGIBILITY        = "eligibility_registration";
-
-    /// @dev Pre-computed keccak256 hashes used for O(1) type dispatch
-    bytes32 private constant _HASH_EVENT_VERIFICATION = keccak256("event_verification");
-    bytes32 private constant _HASH_ELIGIBILITY        = keccak256("eligibility_registration");
 
     /// @dev Report prefix bytes (first byte of onReport payload)
     uint8 private constant _REPORT_EVENT_VERIFICATION = 0x01;
@@ -100,6 +97,18 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
     //                           STATE
     // ================================================================
 
+    /// @notice Authorized CRE workflow fulfiller addresses (e.g. Chainlink Forwarder)
+    mapping(address => bool) public authorizedFulfillers;
+
+    /// @notice Counter for generating unique request IDs (starts at 1)
+    uint256 private _requestIdCounter;
+
+    /// @notice Replay protection: requestId => fulfilled
+    mapping(bytes32 => bool) private _requestFulfilled;
+
+    /// @notice Optional workflowId pinning for production hardening (0 = disabled)
+    bytes32 private _expectedWorkflowId;
+
     /// @notice Per-event records: status, caps, disbursement totals
     mapping(bytes32 => EventRecord) private _events;
 
@@ -111,9 +120,6 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     /// @notice eventId => wallet => delivery confirmed
     mapping(bytes32 => mapping(address => bool)) private _delivered;
-
-    /// @notice requestId => request type string (for dispatch in _fulfillRequest)
-    mapping(bytes32 => string) private _requestTypes;
 
     /// @notice requestId => eventId (for both event_verification and eligibility_registration)
     mapping(bytes32 => bytes32) private _requestToEvent;
@@ -128,6 +134,19 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     /// @notice Cumulative USDC disbursed (enforced against programCap)
     uint256 public totalDisbursed;
+
+    // ================================================================
+    //                           EVENTS
+    // ================================================================
+
+    /// @notice Emitted when a fulfiller is authorized or deauthorized
+    event FulfillerAuthorizationUpdated(address indexed fulfiller, bool authorized);
+
+    // ================================================================
+    //                           ERRORS
+    // ================================================================
+
+    error UnauthorizedFulfiller();
 
     // ================================================================
     //                        CONSTRUCTOR
@@ -162,7 +181,7 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
         _grantRole(DEPOSITOR_ROLE, admin);
         _grantRole(PAUSER_ROLE, admin);
 
-        __ChainlinkCREClient_init();
+        _requestIdCounter = 1;
     }
 
     // ================================================================
@@ -239,7 +258,6 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
         bytes memory requestData = abi.encode(eventId, externalRef);
         requestId = _sendRequest(REQUEST_TYPE_EVENT_VERIFICATION, requestData);
 
-        _requestTypes[requestId] = REQUEST_TYPE_EVENT_VERIFICATION;
         _requestToEvent[requestId] = eventId;
 
         emit EventVerificationRequested(requestId, eventId);
@@ -321,7 +339,6 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
         bytes memory requestData = abi.encode(eventId, recipients, tiers);
         requestId = _sendRequest(REQUEST_TYPE_ELIGIBILITY, requestData);
 
-        _requestTypes[requestId] = REQUEST_TYPE_ELIGIBILITY;
         _requestToEvent[requestId] = eventId;
 
         emit EligibilityRegistrationRequested(requestId, eventId);
@@ -387,30 +404,17 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
      *        report[0]  = prefix byte (0x01 = event_verification, 0x02 = eligibility_registration)
      *        report[1:] = abi.encode(bytes32 requestId, bool verified)                           [0x01]
      *                   = abi.encode(bytes32 requestId, address[] recipients, uint8[] tiers)     [0x02]
-     * @param metadata  CRE workflow metadata (workflowId, workflowName, workflowOwner)
+     * @param metadata  CRE workflow metadata (workflowId at offset 0 if workflowId pinning enabled)
      * @param report    Encoded report payload
      */
-    function onReport(bytes calldata metadata, bytes calldata report) external nonReentrant {
+    function onReport(bytes calldata metadata, bytes calldata report) external override(IReceiver, IReliefTreasury) nonReentrant {
         if (!authorizedFulfillers[msg.sender]) revert UnauthorizedFulfiller();
-        (metadata); // silence unused warning
+        if (_expectedWorkflowId != bytes32(0)) {
+            bytes32 workflowId;
+            assembly { workflowId := calldataload(metadata.offset) }
+            require(workflowId == _expectedWorkflowId, "ReliefTreasury: wrong workflow");
+        }
         _processReport(report);
-    }
-
-    /**
-     * @notice Direct fulfillment entry point — used for testing and non-Forwarder fulfillers.
-     * @dev For eligibility: responseData = abi.encode(address[] recipients, uint8[] tiers).
-     *      For event verification: responseData = abi.encode(bool verified).
-     */
-    function fulfillRequest(bytes32 requestId, bytes calldata responseData) external nonReentrant {
-        if (!authorizedFulfillers[msg.sender]) revert UnauthorizedFulfiller();
-        _validateAndFulfillRequest(requestId, msg.sender, bytes(responseData));
-    }
-
-    /**
-     * @notice Cancel a timed-out request. Only the original requester can cancel after timeout.
-     */
-    function cancelRequest(bytes32 requestId) external nonReentrant {
-        _validateAndCancelRequest(requestId, msg.sender);
     }
 
     // ================================================================
@@ -434,12 +438,17 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
     {
-        _setFulfillerAuthorization(fulfiller, authorized);
+        require(fulfiller != address(0), "ReliefTreasury: invalid fulfiller");
+        authorizedFulfillers[fulfiller] = authorized;
+        emit FulfillerAuthorizationUpdated(fulfiller, authorized);
     }
 
-    /// @notice Update the CRE request timeout. Base contract enforces [1 day, 30 days].
-    function setRequestTimeout(uint256 timeout) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _setRequestTimeout(timeout); // reverts InvalidTimeout if outside [1 day, 30 days]
+    /**
+     * @notice Pin a specific CRE workflowId. Set to bytes32(0) to disable pinning.
+     * @dev When set, onReport will revert if the first 32 bytes of metadata do not match.
+     */
+    function setExpectedWorkflowId(bytes32 workflowId) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _expectedWorkflowId = workflowId;
     }
 
     function pause() external onlyRole(PAUSER_ROLE) { _pause(); }
@@ -469,45 +478,24 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
         if (prefix == _REPORT_EVENT_VERIFICATION) {
             (bytes32 requestId, bool verified) = abi.decode(payload, (bytes32, bool));
-            bytes memory responseData = abi.encode(verified);
-            _validateAndFulfillRequest(requestId, msg.sender, responseData);
+            require(!_requestFulfilled[requestId], "ReliefTreasury: already fulfilled");
+            _requestFulfilled[requestId] = true;
+            _handleEventVerification(requestId, verified);
         } else if (prefix == _REPORT_ELIGIBILITY) {
             (bytes32 requestId, address[] memory recipients, uint8[] memory tiers) =
                 abi.decode(payload, (bytes32, address[], uint8[]));
-            bytes memory responseData = abi.encode(recipients, tiers);
-            _validateAndFulfillRequest(requestId, msg.sender, responseData);
+            require(!_requestFulfilled[requestId], "ReliefTreasury: already fulfilled");
+            _requestFulfilled[requestId] = true;
+            _handleEligibilityRegistration(requestId, recipients, tiers);
         }
         // Unknown prefix: no-op (forward-compatible)
-    }
-
-    // ================================================================
-    //                    INTERNAL: ChainlinkCREClient HOOKS
-    // ================================================================
-
-    function _fulfillRequest(
-        bytes32 requestId,
-        address,
-        bytes memory responseData
-    ) internal override {
-        bytes32 typeHash = keccak256(bytes(_requestTypes[requestId]));
-
-        if (typeHash == _HASH_EVENT_VERIFICATION) {
-            _handleEventVerification(requestId, responseData);
-        } else if (typeHash == _HASH_ELIGIBILITY) {
-            _handleEligibilityRegistration(requestId, responseData);
-        }
-    }
-
-    function _cancelRequest(bytes32 /*requestId*/, address /*requester*/) internal pure override {
-        // No pending state to clean up for eligibility_registration or event_verification
     }
 
     // ================================================================
     //                    INTERNAL: DOMAIN LOGIC
     // ================================================================
 
-    function _handleEventVerification(bytes32 requestId, bytes memory responseData) private {
-        (bool verified) = abi.decode(responseData, (bool));
+    function _handleEventVerification(bytes32 requestId, bool verified) private {
         bytes32 eventId = _requestToEvent[requestId];
         EventRecord storage ev = _events[eventId];
 
@@ -523,8 +511,11 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
      * @dev Only approved recipients are included in the CRE response (CRE filtered via OPA).
      *      This function trusts the Chainlink Forwarder + DON consensus on the report.
      */
-    function _handleEligibilityRegistration(bytes32 requestId, bytes memory responseData) private {
-        (address[] memory recipients, uint8[] memory tiers) = abi.decode(responseData, (address[], uint8[]));
+    function _handleEligibilityRegistration(
+        bytes32 requestId,
+        address[] memory recipients,
+        uint8[] memory tiers
+    ) private {
         bytes32 eventId = _requestToEvent[requestId];
 
         for (uint256 i = 0; i < recipients.length; ) {
@@ -535,6 +526,20 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
             }
             unchecked { ++i; }
         }
+    }
+
+    // ================================================================
+    //                    INTERNAL: REQUEST HELPER
+    // ================================================================
+
+    function _sendRequest(string memory requestType, bytes memory requestData)
+        private
+        returns (bytes32 requestId)
+    {
+        requestId = keccak256(abi.encodePacked(
+            block.chainid, address(this), _requestIdCounter++, block.timestamp, msg.sender
+        ));
+        emit RequestSent(requestId, msg.sender, requestType, requestData);
     }
 
     // ================================================================
@@ -567,5 +572,17 @@ contract ReliefTreasury is IReliefTreasury, ChainlinkCREClient, AccessControl, P
 
     function remainingProgramCap() external view returns (uint256) {
         return programCap - totalDisbursed;
+    }
+
+    /**
+     * @notice ERC165 interface detection — advertises IReceiver support to CRE infrastructure.
+     */
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(AccessControl, IERC165)
+        returns (bool)
+    {
+        return interfaceId == type(IReceiver).interfaceId || super.supportsInterface(interfaceId);
     }
 }
