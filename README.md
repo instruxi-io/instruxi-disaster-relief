@@ -120,7 +120,7 @@ Explicitly identified and out of scope for this build. The contract is designed 
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          ONCHAIN LAYER                                  │
 │                                                                         │
-│   ReliefTreasury.sol (inherits ChainlinkCREClient)                      │
+│   ReliefTreasury.sol (implements IReceiver)                      │
 │   ┌────────────────────────────────────────────────────────────────┐    │
 │   │  Pipeline 1: registerEvent() → requestEventVerification()      │    │
 │   │  Pipeline 2: requestEligibilityRegistration(addrs[], tiers[])  │    │
@@ -608,7 +608,7 @@ Enforced by `ReliefTreasury.sol` regardless of what the CRE workflow sends:
 | Tier must be registered | `_eventTierAmounts[eventId][tier] > 0` |
 | Tier ceiling at registration | Each tier amount bounded by `perRecipientCap` at `registerEvent` time |
 | Reentrancy | `nonReentrant` on all state-changing external functions |
-| Fulfiller whitelist | Only addresses in `authorizedFulfillers` can call `onReport()` or `fulfillRequest()` |
+| Fulfiller whitelist | Only addresses in `authorizedFulfillers` can call `onReport()` |
 | CEI pattern | All state mutations precede `safeTransfer` |
 
 ### Trust Model
