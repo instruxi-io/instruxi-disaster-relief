@@ -177,14 +177,24 @@ Required links per Chainlink hackathon submission rules:
 
 ### CRE Integration Details
 
-- **Trigger:** EVM Log Trigger on `RequestSent(bytes32 indexed requestId, address indexed requester, string requestType, bytes requestData)`
-- **Callback:** Chainlink Forwarder calls `onReport(bytes metadata, bytes report)` on the contract
+Four CRE EVM Log Triggers on a single workflow (`workflow/main.ts`):
+
+| Pipeline | `--trigger-index` | Trigger Event | Handler | Onchain Write |
+|----------|:-----------------:|---------------|---------|:-------------:|
+| 1 — Event Verification | 0 | `RequestSent(requestType="event_verification")` | `onRequestSent` → 2-of-3 consensus | `onReport(0x01 + encode(requestId, verified))` |
+| 2 — Eligibility Registration | 0 | `RequestSent(requestType="eligibility_registration")` | `onRequestSent` → OPA batch | `onReport(0x02 + encode(requestId, addrs[], tiers[]))` |
+| 3 — Proof-of-Disbursement | 1 | `Disbursed(eventId, recipient, amount)` | `onDisbursed` → attestation create + publish | None (pure offchain side-effect) |
+| 4 — Proof-of-Funds | 2 | `Deposited(depositor, amount)` | `onDeposited` → attestation create + publish | None (pure offchain side-effect) |
+
+- **Pipelines 1 & 2 callback:** Chainlink Forwarder calls `onReport(bytes metadata, bytes report)` on the contract
 - **Report format:** `report[0]` = prefix byte; `report[1:]` = ABI-encoded payload
   - `0x01` = event verification: `abi.encode(bytes32 requestId, bool verified)`
   - `0x02` = eligibility registration: `abi.encode(bytes32 requestId, address[] approvedRecipients, uint8[] tiers)`
   - Only OPA-approved recipients are included in the `0x02` payload
+- **Pipelines 3 & 4:** No onchain write. Fire `POST /rwa/attestation/create` + `POST /rwa/attestation/publish` directly via Instruxi API on every `Disbursed` / `Deposited` event — zero admin action required
 - **Forwarder address (Sepolia):** `0x15fc6ae953e024d975e77382eeec56a9101f9f88`
-- **After every fulfillment:** `logCallback.ts` calls `POST /api/webhooks/cre` on the RWA Gateway, which auto-creates a TrustSync attestation as a side-effect
+- **After Pipelines 1 & 2 fulfillment:** `logCallback.ts` calls `POST /api/webhooks/cre` on the RWA Gateway, which auto-creates a TrustSync attestation as a side-effect
+- **Verify attestations:** `npm run query-attestations -- --treasury 0x<CONTRACT_ADDRESS>`
 
 ---
 
@@ -218,7 +228,8 @@ instruxi-disaster-relief/
 │   ├── onboardRecipient.ts         # Phase 3: register → profile → groups wrapper
 │   ├── uploadRoster.ts             # Phase 4A: CSV upload to Object Storage
 │   ├── processRoster.ts            # Phase 4B: ingest roster → onboard → archive
-│   └── createAttestation.ts        # Phase 7: proof-of-funds + disbursement batch
+│   ├── createAttestation.ts        # Phase 7: manual proof-of-funds + disbursement batch
+│   └── queryAttestations.ts        # Phase 7: query auto-created attestations (CRE 3 & 4)
 │
 ├── deploy/
 │   ├── 000_deploy_mocks.ts         # MockUSDC (localhost only)
@@ -345,15 +356,18 @@ No CRE round-trip. Eligibility is onchain state written by the DON.
 
 ### Phase 7 — Attestations (TrustSync)
 
-After every CRE fulfillment, `logCallback.ts` automatically calls `POST /api/webhooks/cre` on the RWA Gateway, which triggers attestation creation. For manual/scheduled proof-of-funds snapshots:
+**Automatic (Pipelines 3 & 4):** Every `Disbursed` and `Deposited` event automatically triggers a TrustSync attestation via CRE. No admin action required. The CRE workflow calls `POST /rwa/attestation/create` + `POST /rwa/attestation/publish` directly.
 
 ```bash
-# Proof of treasury funds (after deposit)
-npm run attest -- proof-of-funds \
-  --treasury 0xReliefTreasury --usdc 0xUSDC \
-  --balance 10000000000 --chain-id 11155111 --account 0xAdmin
+# Verify attestations were created
+npm run query-attestations -- --treasury 0x<CONTRACT_ADDRESS>
+```
 
-# Proof of disbursement batch (after event closes)
+**After every CRE Pipelines 1 & 2 fulfillment:** `logCallback.ts` automatically calls `POST /api/webhooks/cre` on the RWA Gateway, which triggers attestation creation as a side-effect.
+
+**Manual / scheduled proof-of-disbursement batches** (for auditor-signed batch proofs — distinct from per-disbursement auto-attestations):
+
+```bash
 npm run attest -- proof-of-disbursement \
   --treasury 0xReliefTreasury --usdc 0xUSDC \
   --chain-id 11155111 --account 0xAdmin \
@@ -373,7 +387,8 @@ All scripts use `dotenv/config` — copy `.env.example` to `.env` and fill in va
 | `onboardRecipient.ts` | `npm run onboard-recipient` | Register + profile + group-assign a single wallet |
 | `uploadRoster.ts` | `npm run upload-roster` | Upload CSV roster to Instruxi Object Storage |
 | `processRoster.ts` | `npm run process-roster` | Full ingestion: download → validate → onboard → archive |
-| `createAttestation.ts` | `npm run attest` | Create proof-of-funds or proof-of-disbursement batch |
+| `createAttestation.ts` | `npm run attest` | Manual proof-of-funds or auditor-signed disbursement batch |
+| `queryAttestations.ts` | `npm run query-attestations` | Query TrustSync attestations for a treasury (replaces dashboard) |
 
 ### Instruxi API Endpoints Used
 

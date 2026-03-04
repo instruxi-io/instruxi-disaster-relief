@@ -45,6 +45,14 @@ const REQUEST_SENT_ABI = parseAbi([
   "event RequestSent(bytes32 indexed requestId, address indexed requester, string requestType, bytes requestData)",
 ]);
 
+const DISBURSED_ABI = parseAbi([
+  "event Disbursed(bytes32 indexed eventId, address indexed recipient, uint256 amount)",
+]);
+
+const DEPOSITED_ABI = parseAbi([
+  "event Deposited(address indexed depositor, uint256 amount)",
+]);
+
 // ── Typed abi parameter schemas ───────────────────────────────────────────
 
 const EVENT_VERIFICATION_PARAMS  = parseAbiParameters("bytes32 eventId, string externalRef");
@@ -458,6 +466,91 @@ function handleEligibilityRegistration(
   return `EligibilityRegistration: ${approvedRecipients.length}/${candidates.length} approved tx=${txHash}`;
 }
 
+// ── Instruxi attestation helpers (direct API — no onchain write) ──────────
+
+/**
+ * Create a TrustSync attestation via the Instruxi API.
+ * POST /rwa/attestation/create
+ * Returns the attestation ID string.
+ * Throws on 5xx (DON retries) or 401/403 (misconfiguration).
+ */
+function createInstruxiAttestation(
+  runtime: Runtime<WorkflowConfig>,
+  body: {
+    account_address: string;
+    asset_contract_address: string;
+    fractional_amount: number;
+    fractional_decimals: number;
+    fractional_token_contract_address: string;
+    fractional_unit: string;
+    token_id: number;
+    chain_id: number;
+    public: boolean;
+    active: boolean;
+  }
+): string {
+  const { baseUrl } = runtime.config.instruxi;
+  const secrets = runtime.secrets();
+  const apiKey   = (secrets["INSTRUXI_API_KEY"]   as string) ?? "";
+  const adminJwt = (secrets["INSTRUXI_ADMIN_JWT"] as string) ?? "";
+
+  const http = new cre.capabilities.HTTPCapability();
+  const res = http.request(runtime, {
+    method: "POST",
+    url: `${baseUrl}/rwa/attestation/create`,
+    headers: {
+      "Content-Type":  "application/json",
+      "x-api-key":     apiKey,
+      "Authorization": `Bearer ${adminJwt}`,
+    },
+    body: JSON.stringify(body),
+  }).result();
+
+  if (res.statusCode >= 500) {
+    throw new Error(`[Attestation] Server error ${res.statusCode} — DON will retry`);
+  }
+  if (res.statusCode === 401 || res.statusCode === 403) {
+    throw new Error(`[Attestation] Auth error ${res.statusCode} — check INSTRUXI_API_KEY / INSTRUXI_ADMIN_JWT`);
+  }
+
+  const parsed = JSON.parse(res.body) as { data?: { id?: string }; success?: boolean };
+  const id = parsed.data?.id ?? "";
+  if (!id) throw new Error(`[Attestation] createAttestation returned no id: ${res.body}`);
+  return id;
+}
+
+/**
+ * Publish an attestation (make it publicly visible).
+ * POST /rwa/attestation/publish
+ * Throws on 5xx so the DON retries.
+ */
+function publishInstruxiAttestation(
+  runtime: Runtime<WorkflowConfig>,
+  attestationId: string
+): void {
+  const { baseUrl } = runtime.config.instruxi;
+  const secrets = runtime.secrets();
+  const apiKey   = (secrets["INSTRUXI_API_KEY"]   as string) ?? "";
+  const adminJwt = (secrets["INSTRUXI_ADMIN_JWT"] as string) ?? "";
+
+  const http = new cre.capabilities.HTTPCapability();
+  const res = http.request(runtime, {
+    method: "POST",
+    url: `${baseUrl}/rwa/attestation/publish`,
+    headers: {
+      "Content-Type":  "application/json",
+      "x-api-key":     apiKey,
+      "Authorization": `Bearer ${adminJwt}`,
+    },
+    body: JSON.stringify({ id: attestationId }),
+  }).result();
+
+  if (res.statusCode >= 500) {
+    throw new Error(`[Attestation] Publish server error ${res.statusCode} — DON will retry`);
+  }
+  runtime.log(`[Attestation] Published id=${attestationId} status=${res.statusCode}`);
+}
+
 // ── Main log trigger callback ─────────────────────────────────────────────
 
 /**
@@ -496,4 +589,98 @@ export function onRequestSent(runtime: Runtime<WorkflowConfig>, log: EVMLog): st
 
   runtime.log(`Unknown requestType "${requestType}" — no-op`);
   return `Skipped: unknown requestType ${requestType}`;
+}
+
+// ── Disbursed handler (Pipeline 3) ────────────────────────────────────────
+
+/**
+ * Entrypoint for CRE EVM Log Trigger on Disbursed events.
+ * Creates and publishes a proof-of-disbursement TrustSync attestation.
+ * No onchain write — pure offchain side-effect.
+ */
+export function onDisbursed(runtime: Runtime<WorkflowConfig>, log: EVMLog): string {
+  runtime.log("═══════════════════════════════════════════════════════");
+  runtime.log("CRE: DisasterRelief — Disbursed (Pipeline 3)");
+  runtime.log("═══════════════════════════════════════════════════════");
+
+  const topics = log.topics.map((t: Uint8Array) => bytesToHex(t)) as [
+    `0x${string}`,
+    ...`0x${string}`[]
+  ];
+  const data = bytesToHex(log.data);
+
+  const decoded = decodeEventLog({ abi: DISBURSED_ABI, data, topics });
+  const recipient = decoded.args.recipient as string;
+  const amount    = decoded.args.amount    as bigint;
+
+  runtime.log(`recipient: ${recipient}`);
+  runtime.log(`amount:    ${amount} (raw USDC units)`);
+
+  const cfg = runtime.config;
+
+  const attestationId = createInstruxiAttestation(runtime, {
+    account_address:                   recipient,
+    asset_contract_address:            cfg.reliefTreasuryAddress,
+    fractional_amount:                 Number(amount),
+    fractional_decimals:               6,
+    fractional_token_contract_address: cfg.usdcAddress,
+    fractional_unit:                   "USDC",
+    token_id:                          0,
+    chain_id:                          cfg.chainId,
+    public:                            true,
+    active:                            true,
+  });
+
+  runtime.log(`[Attestation] Created proof-of-disbursement id=${attestationId}`);
+  publishInstruxiAttestation(runtime, attestationId);
+
+  const display = `${Number(amount) / 1e6} USDC`;
+  return `DisbursementAttestation: recipient=${recipient} amount=${display} id=${attestationId}`;
+}
+
+// ── Deposited handler (Pipeline 4) ───────────────────────────────────────
+
+/**
+ * Entrypoint for CRE EVM Log Trigger on Deposited events.
+ * Creates and publishes a proof-of-funds TrustSync attestation.
+ * No onchain write — pure offchain side-effect.
+ */
+export function onDeposited(runtime: Runtime<WorkflowConfig>, log: EVMLog): string {
+  runtime.log("═══════════════════════════════════════════════════════");
+  runtime.log("CRE: DisasterRelief — Deposited (Pipeline 4)");
+  runtime.log("═══════════════════════════════════════════════════════");
+
+  const topics = log.topics.map((t: Uint8Array) => bytesToHex(t)) as [
+    `0x${string}`,
+    ...`0x${string}`[]
+  ];
+  const data = bytesToHex(log.data);
+
+  const decoded = decodeEventLog({ abi: DEPOSITED_ABI, data, topics });
+  const depositor = decoded.args.depositor as string;
+  const amount    = decoded.args.amount    as bigint;
+
+  runtime.log(`depositor: ${depositor}`);
+  runtime.log(`amount:    ${amount} (raw USDC units)`);
+
+  const cfg = runtime.config;
+
+  const attestationId = createInstruxiAttestation(runtime, {
+    account_address:                   depositor,
+    asset_contract_address:            cfg.reliefTreasuryAddress,
+    fractional_amount:                 Number(amount),
+    fractional_decimals:               6,
+    fractional_token_contract_address: cfg.usdcAddress,
+    fractional_unit:                   "USDC",
+    token_id:                          0,
+    chain_id:                          cfg.chainId,
+    public:                            true,
+    active:                            true,
+  });
+
+  runtime.log(`[Attestation] Created proof-of-funds id=${attestationId}`);
+  publishInstruxiAttestation(runtime, attestationId);
+
+  const display = `${Number(amount) / 1e6} USDC`;
+  return `DepositAttestation: depositor=${depositor} amount=${display} id=${attestationId}`;
 }

@@ -12,7 +12,8 @@
     "onboard-recipient": "ts-node scripts/onboardRecipient.ts",
     "upload-roster": "ts-node scripts/uploadRoster.ts",
     "process-roster": "ts-node scripts/processRoster.ts",
-    "attest": "ts-node scripts/createAttestation.ts"
+    "attest": "ts-node scripts/createAttestation.ts",
+    "query-attestations": "ts-node scripts/queryAttestations.ts"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",

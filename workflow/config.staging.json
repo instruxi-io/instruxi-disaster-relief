@@ -2,6 +2,8 @@
   "reliefTreasuryAddress": "0x0000000000000000000000000000000000000000",
   "chainSelectorName": "ethereum-testnet-sepolia",
   "gasLimit": "500000",
+  "usdcAddress": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+  "chainId": 11155111,
   "instruxi": {
     "baseUrl": "https://api.instruxi.io",
     "eligibilityGroupPrefix": "Eligible:",

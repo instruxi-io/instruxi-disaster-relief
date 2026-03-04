@@ -4,7 +4,13 @@ Step-by-step checklist to go from zero to a live Sepolia deployment with CRE sim
 
 > **Deployment scope:** This guide targets a Sepolia testnet deployment with a single admin wallet. These are intentional scope decisions — the contract architecture is fully compatible with a Gnosis Safe + TimelockController without code changes. See [Design Decisions](README.md#design-decisions) and [Known Limitations](README.md#known-limitations) in the README for the rationale and production upgrade path for each choice.
 >
-> **Two CRE pipelines:** This deployment runs two distinct CRE workflows — `event_verification` (disaster confirmation via USGS/GDACS/ReliefWeb 2-of-3) and `eligibility_registration` (OPA validation of recipient batch, writes `_eligible` onchain). Both emit `RequestSent` on the same contract; the CRE workflow routes by `requestType`. Disbursement is then synchronous — no CRE round-trip at claim time.
+> **Four CRE pipelines:** This deployment runs four CRE triggers on a single workflow:
+> - Pipeline 1 (`--trigger-index 0`): `RequestSent(event_verification)` → USGS/GDACS/ReliefWeb 2-of-3 → `onReport(0x01)`
+> - Pipeline 2 (`--trigger-index 0`): `RequestSent(eligibility_registration)` → OPA batch validation → `onReport(0x02)`
+> - Pipeline 3 (`--trigger-index 1`): `Disbursed` → proof-of-disbursement TrustSync attestation (no onchain write)
+> - Pipeline 4 (`--trigger-index 2`): `Deposited` → proof-of-funds TrustSync attestation (no onchain write)
+>
+> Pipelines 3 and 4 fire automatically on every disbursement and deposit — no manual `npm run attest` needed.
 
 ---
 
@@ -90,6 +96,8 @@ Open `workflow/config.staging.json` and fill in all placeholders:
   "reliefTreasuryAddress": "0x<YOUR_DEPLOYED_ADDRESS>",
   "chainSelectorName": "ethereum-testnet-sepolia",
   "gasLimit": "500000",
+  "usdcAddress": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+  "chainId": 11155111,
   "instruxi": {
     "baseUrl": "https://api.instruxi.io",
     "eligibilityGroupPrefix": "Eligible:",
@@ -100,6 +108,8 @@ Open `workflow/config.staging.json` and fill in all placeholders:
 ```
 
 `policyId` is your Instruxi OPA policy ID for the `claim_disbursement` action. The CRE workflow calls `POST /enforcer/auth/authorize` with this policy before processing any disbursement.
+
+`usdcAddress` and `chainId` are used by Pipelines 3 and 4 when creating TrustSync attestations for each `Disbursed` and `Deposited` event.
 
 ---
 
@@ -129,7 +139,10 @@ Fill in `secrets.yaml` (one level above `workflow/` — **never commit this file
 ```yaml
 INSTRUXI_API_KEY: "your-instruxi-api-key"
 RWA_GATEWAY_JWT: "your-gateway-jwt"
+INSTRUXI_ADMIN_JWT: "your-instruxi-admin-jwt"
 ```
+
+`INSTRUXI_ADMIN_JWT` is used by Pipelines 3 and 4 (`onDisbursed` / `onDeposited`) to call `POST /rwa/attestation/create` and `POST /rwa/attestation/publish`. Obtain it via `POST /enforcer/auth/authenticate-siwe` with your admin wallet.
 
 ---
 
@@ -295,39 +308,72 @@ This emits `RequestSent("eligibility_registration", ...)` → CRE picks it up �
 
 ---
 
-## Step 11 — Proof-of-Funds Attestation
-
-After depositing USDC into the treasury:
+## Step 11 — Deposit USDC
 
 ```bash
-# First deposit USDC
 npx hardhat deposit-usdc --network sepolia \
   --contract 0x<CONTRACT_ADDRESS> \
   --usdc 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238 \
   --amount 1000000000
+```
 
-# Create proof-of-funds attestation
-npm run attest -- proof-of-funds \
-  --treasury 0x<CONTRACT_ADDRESS> \
-  --usdc 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238 \
-  --balance 1000000000 \
-  --chain-id 11155111 \
-  --account 0x<ADMIN_ADDRESS>
+**Pipeline 4 fires automatically.** The `Deposited` event triggers the CRE EVM Log Trigger (`--trigger-index 2`), which calls `POST /rwa/attestation/create` + `POST /rwa/attestation/publish` via the Instruxi API. No manual `npm run attest` needed.
+
+To simulate Pipeline 4 against this deposit tx:
+
+```bash
+cd workflow
+cre workflow simulate disaster-relief-workflow \
+  --non-interactive \
+  --trigger-index 2 \
+  --evm-tx-hash 0x<DEPOSIT_TX_HASH> \
+  --evm-event-index 0 \
+  --target staging-settings
+```
+
+## Step 12 — Claim Disbursement
+
+```bash
+npx hardhat claim-disbursement --network sepolia \
+  --contract 0x<CONTRACT_ADDRESS> \
+  --eventid 0xfe3dfcfbd3a3040c4882787cfb0471a41ce91cc9e728b73d68b1b44ae8789477
+```
+
+**Pipeline 3 fires automatically.** The `Disbursed` event triggers the CRE EVM Log Trigger (`--trigger-index 1`), which creates and publishes a proof-of-disbursement attestation. No manual `npm run attest` needed.
+
+To simulate Pipeline 3 against a disbursement tx:
+
+```bash
+cd workflow
+cre workflow simulate disaster-relief-workflow \
+  --non-interactive \
+  --trigger-index 1 \
+  --evm-tx-hash 0x<DISBURSED_TX_HASH> \
+  --evm-event-index 0 \
+  --target staging-settings
+```
+
+To verify attestations were created:
+
+```bash
+npm run query-attestations -- --treasury 0x<CONTRACT_ADDRESS>
 ```
 
 ---
 
-## Step 12 — Demo Video Checklist
+## Step 13 — Demo Video Checklist
 
 Record a walkthrough covering:
 - [ ] Deployed contract on Sepolia Etherscan
-- [ ] CRE Pipeline 1 simulation: `event_verification` terminal output (USGS/GDACS/ReliefWeb 2-of-3, `EventVerified` tx on Etherscan)
+- [ ] CRE Pipeline 1 simulation (`--trigger-index 0`): `event_verification` terminal output (USGS/GDACS/ReliefWeb 2-of-3, `EventVerified` tx on Etherscan)
 - [ ] `npm run setup-groups` running (tier-suffixed groups `:1`, `:2`)
 - [ ] `npm run upload-roster` + `process-roster` running
 - [ ] `anchor-roster` tx visible on Etherscan (`RosterAnchored` event)
-- [ ] CRE Pipeline 2 simulation: `eligibility_registration` terminal output (`EligibilitySet` events on Etherscan showing CRE wrote the onchain eligibility gate)
+- [ ] CRE Pipeline 2 simulation (`--trigger-index 0`): `eligibility_registration` terminal output (`EligibilitySet` events on Etherscan showing CRE wrote the onchain eligibility gate)
+- [ ] `deposit-usdc` tx + CRE Pipeline 4 simulation (`--trigger-index 2`): terminal output shows proof-of-funds attestation ID + published status
 - [ ] `claimDisbursement` → direct USDC transfer on Etherscan (no CRE round-trip at claim time)
-- [ ] TrustSync attestation visible in Instruxi dashboard
+- [ ] CRE Pipeline 3 simulation (`--trigger-index 1`): terminal output shows proof-of-disbursement attestation ID + published status
+- [ ] `npm run query-attestations -- --treasury 0x<CONTRACT_ADDRESS>` output shows attestations (replaces "TrustSync attestation visible in dashboard")
 
 ---
 
