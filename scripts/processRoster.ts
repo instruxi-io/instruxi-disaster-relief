@@ -13,6 +13,14 @@
  *   5. POST /admin/groups/account/add-multiple — assign eligible recipients to tier group
  *   6. POST /storage/file/move              — archive processed file
  *
+ * NOTE — Enforcer account registration is NOT performed here.
+ * registerAccount() requires an ECDSA signature per wallet, which is impractical
+ * for batch processing without a service key. Recipients must be registered in
+ * Enforcer before this script runs — either via the frontend self-registration
+ * flow (Privy SIWE) or individually via `npm run onboard-recipient`.
+ * If a wallet is not registered in Enforcer, OPA will deny it during the CRE
+ * eligibility_registration pipeline (logCallback.ts checkRecipientEligibility).
+ *
  * CSV columns (from playbook):
  *   phone_or_ref, regionId, eligibilityStatus, payoutTier
  *

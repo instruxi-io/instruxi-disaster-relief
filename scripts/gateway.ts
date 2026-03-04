@@ -51,13 +51,13 @@ async function req<T>(
 
 export interface CREWebhookPayload {
   requestId: string;
-  requestType: "event_verification" | "disbursement";
+  requestType: "event_verification" | "eligibility_registration";
   txHash: string;
   result: boolean;
-  // disbursement-specific
+  // eligibility_registration-specific
   eventId?: string;
-  recipient?: string;
-  amount?: string;        // hex string of USDC amount (6 decimals)
+  approvedCount?: number;
+  totalCount?: number;
   // event-verification-specific
   verifiedEventId?: string;
 }

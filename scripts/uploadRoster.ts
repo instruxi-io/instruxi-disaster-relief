@@ -49,12 +49,13 @@ export async function uploadRoster(opts: {
   // Step 1: Authorize upload (partner gate)
   if (policyId && opts.callerAddress) {
     console.log(`[authorize] Checking partner permission for ${opts.callerAddress}...`);
-    const allowed = await authorize(policyId, {
+    const res = await authorize(policyId, {
       action: "upload_roster",
       program,
       subject: opts.callerAddress,
     });
-    if (!allowed) {
+    const isAllowed = !!(res.data?.["allowed"] ?? (res as any).allowed);
+    if (!isAllowed) {
       throw new Error(`Unauthorized: caller ${opts.callerAddress} is not permitted to upload rosters for ${program}`);
     }
     console.log("[authorize] ✓ Permitted");

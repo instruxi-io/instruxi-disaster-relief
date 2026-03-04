@@ -9,7 +9,9 @@
  *   3. POST /profile/multi-create             (create/update profile)
  *   4. POST /admin/groups/account/add-multiple (assign to eligible groups)
  *
- * Can be called individually or used by processRoster.ts for batch ingestion.
+ * Use for individual recipients. For batch ingestion, processRoster.ts handles
+ * profile creation and group assignment — but Enforcer account registration must
+ * be done separately (this script or frontend SIWE) before processRoster runs.
  *
  * Usage (single recipient):
  *   npx ts-node scripts/onboardRecipient.ts \
