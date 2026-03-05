@@ -86,10 +86,6 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
     /// @notice The USDC token held and disbursed by this treasury
     IERC20 public immutable usdc;
 
-    /// @notice Hard ceiling for any single disbursement (6 decimals).
-    ///         Enforced at event registration: no tier amount may exceed this value.
-    uint256 public immutable perRecipientCap;
-
     /// @notice Maximum total USDC disbursable across the entire program (6 decimals)
     uint256 public immutable programCap;
 
@@ -156,28 +152,22 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
     // ================================================================
 
     /**
-     * @param _usdc           USDC token address
-     * @param _perRecipientCap Hard ceiling per disbursement (6 decimals, e.g. 100e6 = $100).
-     *                         No event tier amount may exceed this value.
-     * @param _programCap     Max total USDC for the entire program
-     * @param admin           Address granted DEFAULT_ADMIN_ROLE, DEPOSITOR_ROLE, PAUSER_ROLE.
-     *                        In production this should be the funding organization's wallet,
-     *                        not the platform operator.
+     * @param _usdc       USDC token address
+     * @param _programCap Max total USDC for the entire program
+     * @param admin       Address granted DEFAULT_ADMIN_ROLE, DEPOSITOR_ROLE, PAUSER_ROLE.
+     *                    In production this should be the funding organization's wallet,
+     *                    not the platform operator.
      */
     constructor(
         address _usdc,
-        uint256 _perRecipientCap,
         uint256 _programCap,
         address admin
     ) {
         require(_usdc != address(0), "ReliefTreasury: zero USDC address");
         require(admin != address(0), "ReliefTreasury: zero admin address");
-        require(_perRecipientCap > 0, "ReliefTreasury: zero perRecipientCap");
         require(_programCap > 0, "ReliefTreasury: zero programCap");
-        require(_perRecipientCap <= _programCap, "ReliefTreasury: cap inconsistency");
 
         usdc = IERC20(_usdc);
-        perRecipientCap = _perRecipientCap;
         programCap = _programCap;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -240,7 +230,6 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
 
         for (uint256 i = 0; i < tiers.length; ) {
             require(amounts[i] > 0, "ReliefTreasury: zero tier amount");
-            require(amounts[i] <= perRecipientCap, "ReliefTreasury: tier amount exceeds perRecipientCap");
             _eventTierAmounts[eventId][tiers[i]] = amounts[i];
             unchecked { ++i; }
         }

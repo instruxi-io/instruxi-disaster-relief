@@ -21,20 +21,17 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   }
 
   // ── Deployment Parameters ────────────────────────────────────────
-  // $50 USDC per recipient (6 decimals)
-  const perRecipientCap = BigInt(process.env.PER_RECIPIENT_CAP || "50000000");
   // $1,000,000 USDC program cap
   const programCap = BigInt(process.env.PROGRAM_CAP || "1000000000000");
   const admin = process.env.ADMIN_ADDRESS || deployer;
 
-  console.log(`Per-recipient cap: $${Number(perRecipientCap) / 1e6} USDC`);
-  console.log(`Program cap:       $${Number(programCap) / 1e6} USDC`);
-  console.log(`Admin:             ${admin}`);
+  console.log(`Program cap: $${Number(programCap) / 1e6} USDC`);
+  console.log(`Admin:       ${admin}`);
 
   // ── Deploy ───────────────────────────────────────────────────────
   const relief = await deploy("ReliefTreasury", {
     from: deployer,
-    args: [usdcAddress, perRecipientCap, programCap, admin],
+    args: [usdcAddress, programCap, admin],
     log: true,
   });
 
@@ -57,10 +54,9 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   console.log("Deployment Summary");
   console.log("=".repeat(55));
   console.log(`Network:           ${network.name}`);
-  console.log(`ReliefTreasury:    ${relief.address}`);
-  console.log(`USDC:              ${usdcAddress}`);
-  console.log(`Per-recipient cap: $${Number(perRecipientCap) / 1e6}`);
-  console.log(`Program cap:       $${Number(programCap) / 1e6}`);
+  console.log(`ReliefTreasury: ${relief.address}`);
+  console.log(`USDC:           ${usdcAddress}`);
+  console.log(`Program cap:    $${Number(programCap) / 1e6}`);
   console.log(`Admin:             ${admin}`);
   if (forwarder) console.log(`CRE Forwarder:     ${forwarder} (authorized)`);
   console.log("=".repeat(55));

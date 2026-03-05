@@ -45,13 +45,11 @@ async function deployFixture() {
   const MockUSDC = await ethers.getContractFactory("MockUSDC");
   const usdc = (await MockUSDC.deploy()) as unknown as MockUSDC;
 
-  const PER_RECIPIENT_CAP = USDC(100);     // $100 ceiling
-  const PROGRAM_CAP       = USDC(100_000); // $100,000
+  const PROGRAM_CAP = USDC(100_000); // $100,000
 
   const ReliefTreasury = await ethers.getContractFactory("ReliefTreasury");
   const treasury = (await ReliefTreasury.deploy(
     await usdc.getAddress(),
-    PER_RECIPIENT_CAP,
     PROGRAM_CAP,
     admin.address
   )) as unknown as ReliefTreasury;
@@ -69,7 +67,7 @@ async function deployFixture() {
 
   return {
     usdc, treasury, deployer, admin, fulfiller, recipient, other,
-    EVENT_ID, PER_EVENT_CAP, PER_RECIPIENT_CAP, PROGRAM_CAP,
+    EVENT_ID, PER_EVENT_CAP, PROGRAM_CAP,
     TIERS, AMOUNTS,
   };
 }
@@ -91,9 +89,8 @@ describe("ReliefTreasury", function () {
 
   describe("Deployment", function () {
     it("stores immutable parameters correctly", async function () {
-      const { treasury, usdc, PER_RECIPIENT_CAP, PROGRAM_CAP } = await deployFixture();
+      const { treasury, usdc, PROGRAM_CAP } = await deployFixture();
       expect(await treasury.usdc()).to.equal(await usdc.getAddress());
-      expect(await treasury.perRecipientCap()).to.equal(PER_RECIPIENT_CAP);
       expect(await treasury.programCap()).to.equal(PROGRAM_CAP);
     });
 
@@ -111,19 +108,10 @@ describe("ReliefTreasury", function () {
       const ReliefTreasury = await ethers.getContractFactory("ReliefTreasury");
       const [, admin] = await ethers.getSigners();
       await expect(
-        ReliefTreasury.deploy(ethers.ZeroAddress, USDC(100), USDC(100_000), admin.address)
+        ReliefTreasury.deploy(ethers.ZeroAddress, USDC(100_000), admin.address)
       ).to.be.revertedWith("ReliefTreasury: zero USDC address");
     });
 
-    it("reverts when perRecipientCap > programCap", async function () {
-      const ReliefTreasury = await ethers.getContractFactory("ReliefTreasury");
-      const [, admin] = await ethers.getSigners();
-      const MockUSDC = await ethers.getContractFactory("MockUSDC");
-      const usdc = await MockUSDC.deploy();
-      await expect(
-        ReliefTreasury.deploy(await usdc.getAddress(), USDC(1_000), USDC(50), admin.address)
-      ).to.be.revertedWith("ReliefTreasury: cap inconsistency");
-    });
   });
 
   // ── Funding ─────────────────────────────────────────────────────────────
@@ -174,12 +162,6 @@ describe("ReliefTreasury", function () {
       ).to.be.revertedWithCustomError(treasury, "EventAlreadyRegistered");
     });
 
-    it("reverts registerEvent if tier amount exceeds perRecipientCap", async function () {
-      const { treasury, admin, EVENT_ID, PER_EVENT_CAP, PER_RECIPIENT_CAP } = await deployFixture();
-      await expect(
-        treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, [1], [PER_RECIPIENT_CAP + 1n], CLAIM_WINDOW)
-      ).to.be.revertedWith("ReliefTreasury: tier amount exceeds perRecipientCap");
-    });
 
     it("requests event verification and emits RequestSent", async function () {
       const { treasury, admin, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
@@ -524,10 +506,10 @@ describe("ReliefTreasury", function () {
       const MockUSDC = await ethers.getContractFactory("MockUSDC");
       const usdc = (await MockUSDC.deploy()) as unknown as MockUSDC;
 
-      // perRecipientCap=$60, perEventCap=$100 — two $60 payouts cannot fit
+      // perEventCap=$100 — two $60 payouts cannot fit
       const ReliefTreasury = await ethers.getContractFactory("ReliefTreasury");
       const treasury = (await ReliefTreasury.deploy(
-        await usdc.getAddress(), USDC(60), USDC(1_000), admin2.address
+        await usdc.getAddress(), USDC(1_000), admin2.address
       )) as unknown as ReliefTreasury;
 
       await treasury.connect(admin2).setFulfillerAuthorization(fulfiller2.address, true);
@@ -536,7 +518,6 @@ describe("ReliefTreasury", function () {
       await treasury.connect(admin2).deposit(USDC(1_000));
 
       const eventId = ethers.keccak256(ethers.toUtf8Bytes("CAP-TEST"));
-      // tier 2 = $60 (≤ perRecipientCap of $60)
       await treasury.connect(admin2).registerEvent(eventId, USDC(100), [1, 2], [50_000_000n, 60_000_000n], CLAIM_WINDOW);
 
       // Verify event
@@ -577,7 +558,7 @@ describe("ReliefTreasury", function () {
 
       const ReliefTreasury = await ethers.getContractFactory("ReliefTreasury");
       const treasury3 = (await ReliefTreasury.deploy(
-        await usdc3.getAddress(), USDC(100), USDC(1_000), admin3.address
+        await usdc3.getAddress(), USDC(1_000), admin3.address
       )) as unknown as ReliefTreasury;
 
       await treasury3.connect(admin3).setFulfillerAuthorization(fulfiller3.address, true);

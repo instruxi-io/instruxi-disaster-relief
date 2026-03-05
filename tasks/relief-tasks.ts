@@ -223,7 +223,6 @@ task("treasury-status", "Print ReliefTreasury status")
     const remaining = await (relief as any).remainingProgramCap();
     const totalDeposited = await (relief as any).totalDeposited();
     const totalDisbursed = await (relief as any).totalDisbursed();
-    const perRecipientCap = await (relief as any).perRecipientCap();
     const programCap = await (relief as any).programCap();
 
     console.log("=".repeat(50));
@@ -234,9 +233,8 @@ task("treasury-status", "Print ReliefTreasury status")
     console.log(`Available Funds:   $${Number(available) / 1e6} USDC`);
     console.log(`Total Deposited:   $${Number(totalDeposited) / 1e6} USDC`);
     console.log(`Total Disbursed:   $${Number(totalDisbursed) / 1e6} USDC`);
-    console.log(`Program Cap:       $${Number(programCap) / 1e6} USDC`);
-    console.log(`Remaining Cap:     $${Number(remaining) / 1e6} USDC`);
-    console.log(`Per-Recipient Cap: $${Number(perRecipientCap) / 1e6} USDC`);
+    console.log(`Program Cap:   $${Number(programCap) / 1e6} USDC`);
+    console.log(`Remaining Cap: $${Number(remaining) / 1e6} USDC`);
 
     if (eventid) {
       const ev = await (relief as any).getEventRecord(eventid);
