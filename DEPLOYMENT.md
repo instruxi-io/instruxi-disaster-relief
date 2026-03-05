@@ -48,8 +48,7 @@ ETHERSCAN_API_KEY=<YOUR_KEY>
 # USDC on Sepolia — Circle's official testnet USDC
 USDC_ADDRESS=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
 
-# Caps (defaults are fine for testnet)
-PER_RECIPIENT_CAP=50000000        # $50 USDC (6 decimals)
+# Total program USDC cap (default is fine for testnet)
 PROGRAM_CAP=1000000000000         # $1,000,000 USDC
 
 # Admin (leave blank to use deployer address)
@@ -99,9 +98,9 @@ Open `workflow/config.staging.json` and fill in all placeholders:
   "usdcAddress": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
   "chainId": 11155111,
   "instruxi": {
-    "baseUrl": "https://api.instruxi.io",
+    "baseUrl": "https://gateway-staging.instruxi.dev/api/v1",
     "eligibilityGroupPrefix": "Eligible:",
-    "rwGatewayUrl": "https://gateway.instruxi.io",
+    "rwGatewayUrl": "https://rwa-gateway-staging.instruxi.dev",
     "policyId": "<YOUR_INSTRUXI_POLICY_ID>"
   }
 }
@@ -115,13 +114,12 @@ Open `workflow/config.staging.json` and fill in all placeholders:
 
 ## Step 4 — Verify on Etherscan (recommended for judges)
 
-Constructor arg order matches `ReliefTreasury.sol`: `(_usdc, _perRecipientCap, _programCap, admin)`
+Constructor arg order matches `ReliefTreasury.sol`: `(_usdc, _programCap, admin)`
 
 ```bash
 npx hardhat verify --network sepolia \
   0x<CONTRACT_ADDRESS> \
   0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238 \
-  50000000 \
   1000000000000 \
   0x<ADMIN_ADDRESS>
 ```

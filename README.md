@@ -264,7 +264,7 @@ instruxi-disaster-relief/
 |   +-- relief-tasks.ts             # Hardhat tasks: fund, register-event, etc.
 |
 +-- test/
-|   +-- ReliefTreasury.test.ts      # 41 tests -- full contract coverage
+|   +-- ReliefTreasury.test.ts      # 39 tests -- full contract coverage
 |
 +-- rosters/
 |   +-- sample-roster.csv           # Example CSV for processRoster.ts
@@ -473,9 +473,9 @@ RWA_GATEWAY_JWT: "<your-gateway-jwt>"
   "chainSelectorName": "ethereum-testnet-sepolia",
   "gasLimit": "500000",
   "instruxi": {
-    "baseUrl": "https://api.instruxi.io",
+    "baseUrl": "https://gateway-staging.instruxi.dev/api/v1",
     "eligibilityGroupPrefix": "Eligible:",
-    "rwGatewayUrl": "https://gateway.instruxi.io",
+    "rwGatewayUrl": "https://rwa-gateway-staging.instruxi.dev",
     "policyId": "<YOUR_INSTRUXI_POLICY_ID>"
   }
 }
@@ -516,7 +516,7 @@ npm install
 
 ```bash
 npx hardhat compile          # Compile + generate TypeChain types
-npx hardhat test             # Run 41 tests
+npx hardhat test             # Run 39 tests
 npx hardhat node             # Local Hardhat node
 npx hardhat deploy --network localhost
 npx hardhat deploy --network sepolia
@@ -577,13 +577,13 @@ USDC_ADDRESS=
 PROGRAM_CAP=1000000000000        # $1,000,000 USDC
 
 # Instruxi API (scripts/)
-INSTRUXI_BASE_URL=https://api.instruxi.io
+INSTRUXI_BASE_URL=https://gateway-staging.instruxi.dev/api/v1
 INSTRUXI_API_KEY=
 INSTRUXI_ADMIN_JWT=
 INSTRUXI_TENANT_ID=
 
 # RWA Gateway (scripts/ + workflow/)
-RWA_GATEWAY_URL=https://gateway.instruxi.io
+RWA_GATEWAY_URL=https://rwa-gateway-staging.instruxi.dev
 RWA_GATEWAY_JWT=
 ```
 

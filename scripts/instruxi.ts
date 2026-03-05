@@ -1,7 +1,7 @@
 /**
  * instruxi.ts
  *
- * Typed HTTP client for the Instruxi API (api.instruxi.io).
+ * Typed HTTP client for the Instruxi API (gateway-staging.instruxi.dev/api/v1).
  * Covers every endpoint used by the disaster-relief pipeline:
  *   - Enforcer: register, exists, authorize, groups
  *   - Profile: multi-create
@@ -17,7 +17,7 @@
 // ── Config ────────────────────────────────────────────────────────────────
 
 export interface InstruxiConfig {
-  baseUrl: string;       // e.g. https://api.instruxi.io
+  baseUrl: string;       // e.g. https://gateway-staging.instruxi.dev/api/v1
   apiKey: string;        // INSTRUXI_API_KEY (x-api-key header)
   adminJwt: string;      // INSTRUXI_ADMIN_JWT (Bearer token for admin ops)
   tenantId: string;      // INSTRUXI_TENANT_ID
@@ -25,7 +25,7 @@ export interface InstruxiConfig {
 
 function cfg(): InstruxiConfig {
   return {
-    baseUrl:  process.env.INSTRUXI_BASE_URL  || "https://api.instruxi.io",
+    baseUrl:  process.env.INSTRUXI_BASE_URL  || "https://gateway-staging.instruxi.dev/api/v1",
     apiKey:   process.env.INSTRUXI_API_KEY   || "",
     adminJwt: process.env.INSTRUXI_ADMIN_JWT || "",
     tenantId: process.env.INSTRUXI_TENANT_ID || "",

@@ -38,7 +38,7 @@ interface ApiResponse<T> {
 
 function cfg() {
   return {
-    baseUrl:  process.env.INSTRUXI_BASE_URL  || "https://api.instruxi.io",
+    baseUrl:  process.env.INSTRUXI_BASE_URL  || "https://gateway-staging.instruxi.dev/api/v1",
     apiKey:   process.env.INSTRUXI_API_KEY   || "",
     adminJwt: process.env.INSTRUXI_ADMIN_JWT || "",
   };
