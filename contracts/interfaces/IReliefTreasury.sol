@@ -29,6 +29,9 @@ interface IReliefTreasury {
     /// @notice Emitted when a CRE request is sent (EVM Log Trigger listens for this)
     event RequestSent(bytes32 indexed requestId, address indexed requester, string requestType, bytes requestData);
 
+    /// @notice Emitted when the expected CRE workflowId is updated (bytes32(0) = disabled)
+    event ExpectedWorkflowIdUpdated(bytes32 indexed workflowId);
+
     /// @notice Emitted when a disaster event is registered.
     /// @dev tiers and amounts are locked at registration and cannot be changed —
     ///      this event is the onchain commitment the funding org makes upfront.
@@ -93,8 +96,6 @@ interface IReliefTreasury {
     ) external;
 
     function requestEventVerification(bytes32 eventId, string calldata externalRef) external returns (bytes32 requestId);
-
-    function activateEvent(bytes32 eventId) external;
 
     function closeEvent(bytes32 eventId) external;
 

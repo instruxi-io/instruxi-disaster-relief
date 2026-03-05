@@ -184,7 +184,7 @@ describe("ReliefTreasury", function () {
         .to.emit(treasury, "RequestSent");
     });
 
-    it("activates a verified event", async function () {
+    it("CRE auto-activates event on verified report — no manual step", async function () {
       const { treasury, admin, fulfiller, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
       await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
       const ref = JSON.stringify({ usgsId: "us7000abc", region: "US" });
@@ -195,20 +195,45 @@ describe("ReliefTreasury", function () {
 
       await expect(
         treasury.connect(fulfiller).onReport("0x", encodeEventVerificationReport(requestId, true))
-      ).to.emit(treasury, "EventVerified").withArgs(EVENT_ID);
-
-      await expect(treasury.connect(admin).activateEvent(EVENT_ID))
+      )
+        .to.emit(treasury, "EventVerified").withArgs(EVENT_ID)
         .to.emit(treasury, "EventActivated").withArgs(EVENT_ID);
 
+      // Status goes directly to Active — no admin step required
       expect((await treasury.getEventRecord(EVENT_ID)).status).to.equal(3); // Active
     });
 
-    it("closes an event", async function () {
+    it("CRE unverified report leaves event Pending — no activation", async function () {
+      const { treasury, admin, fulfiller, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      const requestId = await extractRequestId(
+        treasury,
+        await treasury.connect(admin).requestEventVerification(EVENT_ID, "{}")
+      );
+      await treasury.connect(fulfiller).onReport("0x", encodeEventVerificationReport(requestId, false));
+      expect((await treasury.getEventRecord(EVENT_ID)).status).to.equal(1); // still Pending
+    });
+
+    it("closes a Pending event", async function () {
       const { treasury, admin, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
       await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
       await expect(treasury.connect(admin).closeEvent(EVENT_ID))
         .to.emit(treasury, "EventClosed").withArgs(EVENT_ID);
       expect((await treasury.getEventRecord(EVENT_ID)).status).to.equal(4); // Closed
+    });
+
+    it("closeEvent reverts on Active event — protects unclaimed eligible recipients", async function () {
+      const { treasury, admin, fulfiller, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      const requestId = await extractRequestId(
+        treasury,
+        await treasury.connect(admin).requestEventVerification(EVENT_ID, "{}")
+      );
+      await treasury.connect(fulfiller).onReport("0x", encodeEventVerificationReport(requestId, true));
+      // Event is now Active — closing must be rejected
+      await expect(
+        treasury.connect(admin).closeEvent(EVENT_ID)
+      ).to.be.revertedWithCustomError(treasury, "InvalidEventTransition");
     });
   });
 
@@ -330,6 +355,41 @@ describe("ReliefTreasury", function () {
         )
       ).to.be.reverted;
     });
+
+    it("reverts requestEligibilityRegistration on Closed event", async function () {
+      const { treasury, admin, recipient, EVENT_ID } = await registeredEventFixture();
+      await treasury.connect(admin).closeEvent(EVENT_ID);
+      await expect(
+        treasury.connect(admin).requestEligibilityRegistration(EVENT_ID, [recipient.address], [1])
+      ).to.be.revertedWithCustomError(treasury, "EventNotActive");
+    });
+
+    it("eligibility cannot be overwritten by a subsequent CRE batch", async function () {
+      const { treasury, admin, fulfiller, recipient, EVENT_ID } = await registeredEventFixture();
+
+      // First batch: recipient gets tier 1
+      const requestId1 = await extractRequestId(
+        treasury,
+        await treasury.connect(admin).requestEligibilityRegistration(EVENT_ID, [recipient.address], [1])
+      );
+      await treasury.connect(fulfiller).onReport(
+        "0x",
+        encodeEligibilityReport(requestId1, [recipient.address], [1])
+      );
+      expect(await treasury.getEligibilityTier(EVENT_ID, recipient.address)).to.equal(1);
+
+      // Second batch: attempts to overwrite with tier 2 — must be silently ignored
+      const requestId2 = await extractRequestId(
+        treasury,
+        await treasury.connect(admin).requestEligibilityRegistration(EVENT_ID, [recipient.address], [2])
+      );
+      await treasury.connect(fulfiller).onReport(
+        "0x",
+        encodeEligibilityReport(requestId2, [recipient.address], [2])
+      );
+      // Original tier 1 must be preserved
+      expect(await treasury.getEligibilityTier(EVENT_ID, recipient.address)).to.equal(1);
+    });
   });
 
   // ── Full Disbursement Flow ───────────────────────────────────────────────
@@ -350,7 +410,7 @@ describe("ReliefTreasury", function () {
       await treasury.connect(admin).deposit(USDC(10_000));
       await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
 
-      // Step 1: CRE verifies the disaster event
+      // Step 1: CRE verifies the disaster event — auto-activates
       const verifyRequestId = await extractRequestId(
         treasury,
         await treasury.connect(admin).requestEventVerification(
@@ -358,7 +418,6 @@ describe("ReliefTreasury", function () {
         )
       );
       await treasury.connect(fulfiller).onReport("0x", encodeEventVerificationReport(verifyRequestId, true));
-      await treasury.connect(admin).activateEvent(EVENT_ID);
 
       // Step 2: CRE sets eligibility for both test recipients
       const eligRequestId = await extractRequestId(
@@ -454,7 +513,6 @@ describe("ReliefTreasury", function () {
         .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
         .find((l: any) => l?.name === "RequestSent");
       await treasury.connect(fulfiller2).onReport("0x", encodeEventVerificationReport(vLog!.args.requestId, true));
-      await treasury.connect(admin2).activateEvent(eventId);
 
       // Register eligibility for both recipients (tier 2 = $60)
       const eligTx = await treasury.connect(admin2).requestEligibilityRegistration(
@@ -504,7 +562,6 @@ describe("ReliefTreasury", function () {
         .map((l: any) => { try { return iface.parseLog(l); } catch { return null; } })
         .find((l: any) => l?.name === "RequestSent");
       await treasury3.connect(fulfiller3).onReport("0x", encodeEventVerificationReport(vLog!.args.requestId, true));
-      await treasury3.connect(admin3).activateEvent(eventId);
 
       // CRE sets r3 as eligible at tier 3 (which has no configured amount)
       const eligTx = await treasury3.connect(admin3).requestEligibilityRegistration(

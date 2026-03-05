@@ -264,21 +264,15 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
     }
 
     /**
-     * @notice Admin activates a CRE-verified event to open disbursements.
-     */
-    function activateEvent(bytes32 eventId) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        EventRecord storage ev = _events[eventId];
-        if (ev.status != EventStatus.Verified) revert InvalidEventTransition(ev.status, EventStatus.Verified);
-        ev.status = EventStatus.Active;
-        emit EventActivated(eventId);
-    }
-
-    /**
      * @notice Admin closes an event — no further disbursements allowed.
+     * @dev Cannot close an Active event. Once Active, eligible recipients retain the right
+     *      to claim until the contract is paused via an emergency. This prevents an admin
+     *      from silently locking out recipients who have not yet claimed.
      */
     function closeEvent(bytes32 eventId) external onlyRole(DEFAULT_ADMIN_ROLE) {
         EventRecord storage ev = _events[eventId];
         if (ev.status == EventStatus.Unregistered) revert EventNotFound(eventId);
+        if (ev.status == EventStatus.Active) revert InvalidEventTransition(ev.status, EventStatus.Closed);
         ev.status = EventStatus.Closed;
         emit EventClosed(eventId);
     }
@@ -333,6 +327,7 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
         uint8[] calldata tiers
     ) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused returns (bytes32 requestId) {
         if (_events[eventId].status == EventStatus.Unregistered) revert EventNotFound(eventId);
+        if (_events[eventId].status == EventStatus.Closed) revert EventNotActive(eventId);
         require(recipients.length > 0, "ReliefTreasury: empty recipients");
         require(recipients.length == tiers.length, "ReliefTreasury: length mismatch");
 
@@ -449,6 +444,7 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
      */
     function setExpectedWorkflowId(bytes32 workflowId) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _expectedWorkflowId = workflowId;
+        emit ExpectedWorkflowIdUpdated(workflowId);
     }
 
     function pause() external onlyRole(PAUSER_ROLE) { _pause(); }
@@ -500,8 +496,9 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
         EventRecord storage ev = _events[eventId];
 
         if (verified && ev.status == EventStatus.Pending) {
-            ev.status = EventStatus.Verified;
+            ev.status = EventStatus.Active;
             emit EventVerified(eventId);
+            emit EventActivated(eventId);
         }
     }
 
@@ -520,7 +517,8 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
 
         for (uint256 i = 0; i < recipients.length; ) {
             uint8 tier = tiers[i];
-            if (tier > 0) {
+            // First write wins — prevents a second CRE batch from overwriting an existing grant.
+            if (tier > 0 && _eligible[eventId][recipients[i]] == 0) {
                 _eligible[eventId][recipients[i]] = tier;
                 emit EligibilitySet(eventId, recipients[i], tier);
             }
