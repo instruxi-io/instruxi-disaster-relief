@@ -169,11 +169,11 @@ Required links per Chainlink hackathon submission rules:
 | [`workflow/workflow.yaml`](workflow/workflow.yaml) | CRE CLI settings (staging + production targets) |
 | [`workflow/config.staging.json`](workflow/config.staging.json) | Staging config — Sepolia, chain selector, gas limit, Instruxi URLs |
 | [`workflow/config.production.json`](workflow/config.production.json) | Production config template |
-| [`contracts/utils/ChainlinkCREClient.sol`](contracts/utils/ChainlinkCREClient.sol) | Abstract CRE base — `_sendRequest()` / `_validateAndFulfillRequest()` / `_fulfillRequest()` |
-| [`contracts/ReliefTreasury.sol`](contracts/ReliefTreasury.sol) | Main contract — inherits `ChainlinkCREClient`, implements `onReport()` |
-| [`contracts/interfaces/IReliefTreasury.sol`](contracts/interfaces/IReliefTreasury.sol) | Interface — declares `onReport()`, `fulfillRequest()`, `cancelRequest()` CRE callback signatures |
+| [`contracts/interfaces/IReceiver.sol`](contracts/interfaces/IReceiver.sol) | Standard Chainlink CRE receiver interface — declares `onReport()` entry point, implemented by `ReliefTreasury` |
+| [`contracts/ReliefTreasury.sol`](contracts/ReliefTreasury.sol) | Main contract — implements `IReceiver`, handles `onReport()` routing via prefix byte |
+| [`contracts/interfaces/IReliefTreasury.sol`](contracts/interfaces/IReliefTreasury.sol) | Interface — declares all events, errors, and function signatures including `onReport()` |
 | [`deploy/001_deploy_relief_treasury.ts`](deploy/001_deploy_relief_treasury.ts) | Deploy script — deploys treasury and authorizes Chainlink Forwarder post-deploy |
-| [`tasks/relief-tasks.ts`](tasks/relief-tasks.ts) | Hardhat tasks — `request-verification`, `register-event`, `activate-event`, `request-eligibility` |
+| [`tasks/relief-tasks.ts`](tasks/relief-tasks.ts) | Hardhat tasks — `request-verification` and `request-eligibility` emit `RequestSent` to trigger CRE Pipelines 1 & 2; also includes `register-event`, `activate-event`, `anchor-roster`, `deposit-usdc`, `claim-disbursement`, `treasury-status` |
 
 ### CRE Integration Details
 
