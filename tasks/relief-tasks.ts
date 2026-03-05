@@ -10,7 +10,8 @@ task("register-event", "Register a new disaster event and commit per-tier payout
   .addParam("cap", "Per-event USDC cap (6 decimals, e.g. 5000000000 = $5000)")
   .addParam("tiers", "Comma-separated tier numbers, e.g. 1,2")
   .addParam("amounts", "Comma-separated raw USDC amounts per tier (6 dec), e.g. 50000000,100000000")
-  .setAction(async ({ contract, eventid, cap, tiers, amounts }, hre) => {
+  .addParam("claimwindow", "Claim window in days (1–365). Admin cannot close a verified event until this many days after activation.", "90", types.string, true)
+  .setAction(async ({ contract, eventid, cap, tiers, amounts, claimwindow }, hre) => {
     const [signer] = await hre.ethers.getSigners();
     const relief = await hre.ethers.getContractAt("ReliefTreasury", contract, signer);
 
@@ -18,21 +19,27 @@ task("register-event", "Register a new disaster event and commit per-tier payout
       ? eventid
       : hre.ethers.keccak256(hre.ethers.toUtf8Bytes(eventid));
 
-    const tierArr   = (tiers as string).split(",").map((t: string) => parseInt(t.trim(), 10));
-    const amountArr = (amounts as string).split(",").map((a: string) => BigInt(a.trim()));
+    const tierArr      = (tiers as string).split(",").map((t: string) => parseInt(t.trim(), 10));
+    const amountArr    = (amounts as string).split(",").map((a: string) => BigInt(a.trim()));
+    const claimWindowDays = parseInt(claimwindow as string, 10);
 
     if (tierArr.length !== amountArr.length) {
       console.error("Error: tiers and amounts must have the same number of entries");
       process.exit(1);
     }
+    if (claimWindowDays < 1 || claimWindowDays > 365) {
+      console.error("Error: --claimwindow must be between 1 and 365 days");
+      process.exit(1);
+    }
 
     console.log(`Registering event ${eventId}:`);
-    console.log(`  Per-event cap: $${Number(cap) / 1e6} USDC`);
+    console.log(`  Per-event cap:  $${Number(cap) / 1e6} USDC`);
+    console.log(`  Claim window:   ${claimWindowDays} days from activation`);
     tierArr.forEach((t: number, i: number) =>
       console.log(`  Tier ${t}: $${Number(amountArr[i]) / 1e6} USDC`)
     );
 
-    const tx = await (relief as any).registerEvent(eventId, BigInt(cap), tierArr, amountArr);
+    const tx = await (relief as any).registerEvent(eventId, BigInt(cap), tierArr, amountArr, claimWindowDays);
     const receipt = await tx.wait();
     console.log(`✅ Event registered. Tx: ${receipt.hash}`);
   });

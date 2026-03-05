@@ -18,6 +18,7 @@ interface IReliefTreasury {
         EventStatus status;
         uint256 perEventCap;
         uint256 totalDisbursed;
+        uint256 claimDeadline;  // unix timestamp after which closeEvent is permitted; 0 until activated
     }
 
     // ================================================================
@@ -35,7 +36,7 @@ interface IReliefTreasury {
     /// @notice Emitted when a disaster event is registered.
     /// @dev tiers and amounts are locked at registration and cannot be changed —
     ///      this event is the onchain commitment the funding org makes upfront.
-    event EventRegistered(bytes32 indexed eventId, uint256 perEventCap, uint8[] tiers, uint256[] amounts);
+    event EventRegistered(bytes32 indexed eventId, uint256 perEventCap, uint8[] tiers, uint256[] amounts, uint256 claimWindowDays);
 
     event EventVerificationRequested(bytes32 indexed requestId, bytes32 indexed eventId);
     event EventVerified(bytes32 indexed eventId);
@@ -71,6 +72,7 @@ interface IReliefTreasury {
     error ProgramCapExceeded(uint256 available, uint256 requested);
     error InsufficientTreasuryFunds(uint256 available, uint256 requested);
     error InvalidEventTransition(EventStatus current, EventStatus required);
+    error ClaimWindowNotExpired(uint256 claimDeadline);
     error NotPaused();
 
     // ================================================================
@@ -92,7 +94,8 @@ interface IReliefTreasury {
         bytes32 eventId,
         uint256 perEventCap,
         uint8[] calldata tiers,
-        uint256[] calldata amounts
+        uint256[] calldata amounts,
+        uint256 claimWindowDays
     ) external;
 
     function requestEventVerification(bytes32 eventId, string calldata externalRef) external returns (bytes32 requestId);

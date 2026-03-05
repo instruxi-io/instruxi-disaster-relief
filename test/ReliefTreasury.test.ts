@@ -6,6 +6,12 @@ import { MockUSDC, ReliefTreasury } from "../typechain-types";
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 const USDC = (n: number) => BigInt(n) * 1_000_000n; // 6 decimals
+const CLAIM_WINDOW = 30; // days — default for most tests
+
+async function increaseTime(seconds: number) {
+  await ethers.provider.send("evm_increaseTime", [seconds]);
+  await ethers.provider.send("evm_mine", []);
+}
 
 function encodeEventVerificationReport(requestId: string, verified: boolean): string {
   const payload = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -150,9 +156,9 @@ describe("ReliefTreasury", function () {
   describe("Event Management", function () {
     it("registers an event with tier amounts and emits EventRegistered", async function () {
       const { treasury, admin, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
-      await expect(treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS))
+      await expect(treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW))
         .to.emit(treasury, "EventRegistered")
-        .withArgs(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+        .withArgs(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       const ev = await treasury.getEventRecord(EVENT_ID);
       expect(ev.status).to.equal(1); // Pending
       expect(ev.perEventCap).to.equal(PER_EVENT_CAP);
@@ -162,22 +168,22 @@ describe("ReliefTreasury", function () {
 
     it("reverts duplicate event registration", async function () {
       const { treasury, admin, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       await expect(
-        treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS)
+        treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW)
       ).to.be.revertedWithCustomError(treasury, "EventAlreadyRegistered");
     });
 
     it("reverts registerEvent if tier amount exceeds perRecipientCap", async function () {
       const { treasury, admin, EVENT_ID, PER_EVENT_CAP, PER_RECIPIENT_CAP } = await deployFixture();
       await expect(
-        treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, [1], [PER_RECIPIENT_CAP + 1n])
+        treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, [1], [PER_RECIPIENT_CAP + 1n], CLAIM_WINDOW)
       ).to.be.revertedWith("ReliefTreasury: tier amount exceeds perRecipientCap");
     });
 
     it("requests event verification and emits RequestSent", async function () {
       const { treasury, admin, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       const ref = JSON.stringify({ usgsId: "us7000abc", region: "US", minMagnitude: 5 });
       await expect(treasury.connect(admin).requestEventVerification(EVENT_ID, ref))
         .to.emit(treasury, "EventVerificationRequested")
@@ -186,7 +192,7 @@ describe("ReliefTreasury", function () {
 
     it("CRE auto-activates event on verified report — no manual step", async function () {
       const { treasury, admin, fulfiller, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       const ref = JSON.stringify({ usgsId: "us7000abc", region: "US" });
       const requestId = await extractRequestId(
         treasury,
@@ -205,7 +211,7 @@ describe("ReliefTreasury", function () {
 
     it("CRE unverified report leaves event Pending — no activation", async function () {
       const { treasury, admin, fulfiller, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       const requestId = await extractRequestId(
         treasury,
         await treasury.connect(admin).requestEventVerification(EVENT_ID, "{}")
@@ -216,24 +222,52 @@ describe("ReliefTreasury", function () {
 
     it("closes a Pending event", async function () {
       const { treasury, admin, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       await expect(treasury.connect(admin).closeEvent(EVENT_ID))
         .to.emit(treasury, "EventClosed").withArgs(EVENT_ID);
       expect((await treasury.getEventRecord(EVENT_ID)).status).to.equal(4); // Closed
     });
 
-    it("closeEvent reverts on Active event — protects unclaimed eligible recipients", async function () {
+    it("closeEvent reverts on Active event before claim window expires", async function () {
       const { treasury, admin, fulfiller, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       const requestId = await extractRequestId(
         treasury,
         await treasury.connect(admin).requestEventVerification(EVENT_ID, "{}")
       );
       await treasury.connect(fulfiller).onReport("0x", encodeEventVerificationReport(requestId, true));
-      // Event is now Active — closing must be rejected
+      // Event is Active — claim window has not passed, closing must be rejected
       await expect(
         treasury.connect(admin).closeEvent(EVENT_ID)
-      ).to.be.revertedWithCustomError(treasury, "InvalidEventTransition");
+      ).to.be.revertedWithCustomError(treasury, "ClaimWindowNotExpired");
+    });
+
+    it("closeEvent succeeds on Active event after claim window expires", async function () {
+      const { treasury, admin, fulfiller, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
+      // Register with 1-day window so we can advance time cheaply
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, 1);
+      const requestId = await extractRequestId(
+        treasury,
+        await treasury.connect(admin).requestEventVerification(EVENT_ID, "{}")
+      );
+      await treasury.connect(fulfiller).onReport("0x", encodeEventVerificationReport(requestId, true));
+
+      // Advance chain time past the 1-day window
+      await increaseTime(1 * 24 * 60 * 60 + 1);
+
+      await expect(treasury.connect(admin).closeEvent(EVENT_ID))
+        .to.emit(treasury, "EventClosed").withArgs(EVENT_ID);
+      expect((await treasury.getEventRecord(EVENT_ID)).status).to.equal(4); // Closed
+    });
+
+    it("registerEvent reverts on invalid claim window (0 days or > 365 days)", async function () {
+      const { treasury, admin, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
+      await expect(
+        treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, 0)
+      ).to.be.revertedWith("ReliefTreasury: invalid claim window");
+      await expect(
+        treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, 366)
+      ).to.be.revertedWith("ReliefTreasury: invalid claim window");
     });
   });
 
@@ -242,7 +276,7 @@ describe("ReliefTreasury", function () {
   describe("Roster Transparency", function () {
     it("anchorRoster emits RosterAnchored with hash and event context", async function () {
       const { treasury, admin, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
 
       // Simulates sha256 of a CSV file (truncated to bytes32 for the test)
       const rosterHash = ethers.keccak256(ethers.toUtf8Bytes("roster-csv-content-hash"));
@@ -264,7 +298,7 @@ describe("ReliefTreasury", function () {
 
     it("reverts anchorRoster from non-admin", async function () {
       const { treasury, admin, other, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = await deployFixture();
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       const rosterHash = ethers.keccak256(ethers.toUtf8Bytes("some-csv"));
       await expect(
         treasury.connect(other).anchorRoster(rosterHash, EVENT_ID, "US-FLOOD-2026", "US-CA")
@@ -278,7 +312,7 @@ describe("ReliefTreasury", function () {
     async function registeredEventFixture() {
       const ctx = await deployFixture();
       const { treasury, admin, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = ctx;
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       return ctx;
     }
 
@@ -408,7 +442,7 @@ describe("ReliefTreasury", function () {
       const { treasury, usdc, admin, fulfiller, recipient, other, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS } = ctx;
 
       await treasury.connect(admin).deposit(USDC(10_000));
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
 
       // Step 1: CRE verifies the disaster event — auto-activates
       const verifyRequestId = await extractRequestId(
@@ -503,7 +537,7 @@ describe("ReliefTreasury", function () {
 
       const eventId = ethers.keccak256(ethers.toUtf8Bytes("CAP-TEST"));
       // tier 2 = $60 (≤ perRecipientCap of $60)
-      await treasury.connect(admin2).registerEvent(eventId, USDC(100), [1, 2], [50_000_000n, 60_000_000n]);
+      await treasury.connect(admin2).registerEvent(eventId, USDC(100), [1, 2], [50_000_000n, 60_000_000n], CLAIM_WINDOW);
 
       // Verify event
       const iface = treasury.interface;
@@ -553,7 +587,7 @@ describe("ReliefTreasury", function () {
 
       const eventId = ethers.keccak256(ethers.toUtf8Bytes("TIER-TEST"));
       // Only tier 1 configured — no tier 3
-      await treasury3.connect(admin3).registerEvent(eventId, USDC(1_000), [1], [50_000_000n]);
+      await treasury3.connect(admin3).registerEvent(eventId, USDC(1_000), [1], [50_000_000n], CLAIM_WINDOW);
 
       const iface = treasury3.interface;
       const verifyTx = await treasury3.connect(admin3).requestEventVerification(eventId, "{}");
@@ -588,7 +622,7 @@ describe("ReliefTreasury", function () {
     it("fulfiller marks delivery confirmed", async function () {
       const { treasury, fulfiller, recipient, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, admin } =
         await deployFixture();
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       await expect(
         treasury.connect(fulfiller).markDelivered(EVENT_ID, recipient.address)
       )
@@ -600,7 +634,7 @@ describe("ReliefTreasury", function () {
     it("reverts markDelivered from non-fulfiller", async function () {
       const { treasury, other, recipient, EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, admin } =
         await deployFixture();
-      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS);
+      await treasury.connect(admin).registerEvent(EVENT_ID, PER_EVENT_CAP, TIERS, AMOUNTS, CLAIM_WINDOW);
       await expect(
         treasury.connect(other).markDelivered(EVENT_ID, recipient.address)
       ).to.be.revertedWithCustomError(treasury, "UnauthorizedFulfiller");

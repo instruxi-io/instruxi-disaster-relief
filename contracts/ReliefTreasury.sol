@@ -124,6 +124,9 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
     /// @notice requestId => eventId (for both event_verification and eligibility_registration)
     mapping(bytes32 => bytes32) private _requestToEvent;
 
+    /// @notice eventId => claim window in seconds (set at registration, used to compute claimDeadline on activation)
+    mapping(bytes32 => uint256) private _claimWindowSeconds;
+
     /// @notice eventId => wallet => CRE-assigned payout tier (0 = not eligible, 1-255 = tier N)
     /// @dev Written exclusively by CRE fulfiller via requestEligibilityRegistration → onReport.
     ///      This is the onchain eligibility gate: claimDisbursement checks this before paying.
@@ -218,16 +221,21 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
         bytes32 eventId,
         uint256 perEventCap,
         uint8[] calldata tiers,
-        uint256[] calldata amounts
+        uint256[] calldata amounts,
+        uint256 claimWindowDays
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (_events[eventId].status != EventStatus.Unregistered) revert EventAlreadyRegistered(eventId);
         require(perEventCap > 0, "ReliefTreasury: zero perEventCap");
         require(tiers.length > 0 && tiers.length == amounts.length, "ReliefTreasury: tiers required");
+        require(claimWindowDays >= 1 && claimWindowDays <= 365, "ReliefTreasury: invalid claim window");
+
+        _claimWindowSeconds[eventId] = claimWindowDays * 1 days;
 
         _events[eventId] = EventRecord({
             status: EventStatus.Pending,
             perEventCap: perEventCap,
-            totalDisbursed: 0
+            totalDisbursed: 0,
+            claimDeadline: 0
         });
 
         for (uint256 i = 0; i < tiers.length; ) {
@@ -237,7 +245,7 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
             unchecked { ++i; }
         }
 
-        emit EventRegistered(eventId, perEventCap, tiers, amounts);
+        emit EventRegistered(eventId, perEventCap, tiers, amounts, claimWindowDays);
     }
 
     /**
@@ -272,7 +280,9 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
     function closeEvent(bytes32 eventId) external onlyRole(DEFAULT_ADMIN_ROLE) {
         EventRecord storage ev = _events[eventId];
         if (ev.status == EventStatus.Unregistered) revert EventNotFound(eventId);
-        if (ev.status == EventStatus.Active) revert InvalidEventTransition(ev.status, EventStatus.Closed);
+        if (ev.status == EventStatus.Active) {
+            if (block.timestamp < ev.claimDeadline) revert ClaimWindowNotExpired(ev.claimDeadline);
+        }
         ev.status = EventStatus.Closed;
         emit EventClosed(eventId);
     }
@@ -497,6 +507,7 @@ contract ReliefTreasury is IReliefTreasury, IReceiver, AccessControl, Pausable, 
 
         if (verified && ev.status == EventStatus.Pending) {
             ev.status = EventStatus.Active;
+            ev.claimDeadline = block.timestamp + _claimWindowSeconds[eventId];
             emit EventVerified(eventId);
             emit EventActivated(eventId);
         }
