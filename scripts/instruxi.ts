@@ -113,6 +113,23 @@ export interface GroupRecord {
   updated_at?: string;
 }
 
+export interface UserRecord {
+  id: string;
+  email?: string;
+  account_address?: string;
+  tenant_id?: string;
+  role?: { id: string; name: string };
+}
+
+export interface WalletRecord {
+  id: string;
+  address: string;
+  chain_id: number;
+  name?: string;
+  provider?: string;
+  created_at?: string;
+}
+
 // ── Enforcer-v2: Auth ─────────────────────────────────────────────────────
 
 /**
@@ -172,6 +189,77 @@ export async function authorize(
 }
 
 /**
+ * Create a new user in enforcer-v2 as admin.
+ * POST /admin/users
+ *
+ * Used to pre-provision victim accounts from a CSV before they log in.
+ * account_address is required by the API — pass a zero address as placeholder
+ * if the real wallet will be provisioned separately via createUserWallet().
+ */
+export async function adminCreateUser(
+  email: string,
+  opts: {
+    account_address?: string;
+    first_name?: string;
+    last_name?: string;
+    role_id?: string;
+  } = {}
+): Promise<ApiResponse<UserRecord>> {
+  const tenantId = cfg().tenantId;
+  return req("POST", "/admin/users", {
+    email,
+    account_address: opts.account_address ?? "0x0000000000000000000000000000000000000000",
+    ...(tenantId ? { tenant_id: tenantId } : {}),
+    ...(opts.first_name ? { first_name: opts.first_name } : {}),
+    ...(opts.last_name ? { last_name: opts.last_name } : {}),
+    ...(opts.role_id ? { role_id: opts.role_id } : {}),
+  });
+}
+
+/**
+ * Provision a new wallet for an existing enforcer user.
+ * POST /users/{user_id}/wallets
+ *
+ * The enforcer creates and manages the wallet via Privy under the hood.
+ * Returns the wallet address which can be used for onchain eligibility.
+ *
+ * @param userId  Enforcer-v2 UUID for the user
+ * @param chainId Chain ID (11155111 for Sepolia)
+ * @param name    Human-readable wallet label
+ */
+export async function createUserWallet(
+  userId: string,
+  chainId: number = 11155111,
+  name: string = "relief-wallet"
+): Promise<ApiResponse<WalletRecord>> {
+  return req("POST", `/users/${userId}/wallets`, {
+    user_id: userId,
+    chain_id: chainId,
+    name,
+    provider: "privy",
+  });
+}
+
+/**
+ * Resolve a user by email address to their enforcer-v2 record + wallets.
+ * GET /admin/users/resolve?email={email}&include=wallets
+ *
+ * Use this after victims have logged in to retrieve their wallet addresses.
+ */
+export async function resolveUserByEmail(
+  email: string
+): Promise<(UserRecord & { wallets?: WalletRecord[] }) | null> {
+  try {
+    const res = await req<ApiResponse<UserRecord & { wallets?: WalletRecord[] }>>(
+      "GET", `/admin/users/resolve?email=${encodeURIComponent(email)}&include=wallets`
+    );
+    return res.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Resolve a wallet address to the user's enforcer-v2 UUID.
  * GET /admin/users/resolve?account_address={address}
  *
@@ -201,9 +289,10 @@ export async function createGroup(
   name: string,
   description?: string
 ): Promise<ApiResponse<GroupRecord>> {
+  const tenantId = cfg().tenantId;
   return req("POST", "/admin/groups", {
     name,
-    tenant_id: cfg().tenantId,
+    ...(tenantId ? { tenant_id: tenantId } : {}),
     ...(description ? { description } : {}),
   });
 }

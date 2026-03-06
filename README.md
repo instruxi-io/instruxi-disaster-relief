@@ -337,15 +337,16 @@ The `requestEventVerification` call emits `RequestSent`. CRE picks it up, querie
 # Partner uploads CSV to Instruxi Object Storage
 npm run upload-roster -- --file rosters/sample-roster.csv \
   --program US-FLOOD-2026 --region US-CA
+# Returns: object_key (pass to process-roster below)
 
-# Admin triggers ingestion (fetches via presigned URL, validates, onboards)
+# Admin triggers ingestion (fetches via presigned URL, validates, provisions wallets)
 npm run process-roster -- \
-  --file-id <returned-file-id> \
+  --object-key <returned-object-key> \
   --program US-FLOOD-2026 --region US-CA \
   --tier-group-ids '{"1":"groupId_standard","2":"groupId_priority"}'
 ```
 
-`processRoster` runs the full pipeline: presigned URL download -> CSV validation -> `POST /profile/multi-create` -> tier-based `POST /admin/groups/account/add-multiple` (standard tier -> `:1` group, priority tier -> `:2` group) -> archive file.
+`processRoster` runs the full pipeline: presigned URL download → CSV validation → for each eligible row: `POST /admin/users` (create enforcer user from email) → `POST /users/{user_id}/wallets` (provision Privy-backed wallet) → `POST /admin/groups/users/batch` (assign to tier group) → collect `wallets[]` + `tiers[]` → archive file. The returned wallet addresses are used directly in Phase 5.
 
 After processing, anchor the roster hash onchain for public auditability:
 
@@ -423,26 +424,30 @@ All scripts use `dotenv/config`. Copy `.env.example` to `.env` and fill in value
 
 ### Instruxi API Endpoints Used
 
+**Enforcer-v2** (`INSTRUXI_BASE_URL`):
+
 | Endpoint | Script | Purpose |
 |----------|--------|---------|
-| `GET /enforcer/account/exists/{address}` | onboardRecipient | Check before registering |
-| `POST /enforcer/auth/account/register` | onboardRecipient | Register new Enforcer account |
-| `POST /enforcer/auth/authorize` | uploadRoster, processRoster | Policy gate (partner/admin check) |
-| `POST /profile/multi-create` | onboardRecipient, processRoster | Batch create profiles |
-| `POST /admin/groups/create` | setupGroups | Create group hierarchy |
-| `POST /admin/groups/account/add-multiple` | onboardRecipient, processRoster | Assign to eligible groups |
-| `POST /enforcer/auth/authorize` | logCallback.ts (CRE) | OPA policy check per-wallet during eligibility_registration |
-| `POST /os/file/upload` | uploadRoster | Upload CSV roster |
-| `POST /os/file/metadata` | uploadRoster | Tag with program/region metadata |
-| `GET /storage/file/presigned-url` | processRoster | Time-limited download URL |
-| `POST /storage/file/move` | processRoster | Archive processed roster |
-| `POST /rwa/attestation/create` | createAttestation | Proof-of-funds / per-disbursement proof |
-| `POST /rwa/attestation/publish` | createAttestation | Make attestation public |
-| `POST /rwa/attestation-batches` | createAttestation | Group disbursement proofs |
-| `POST /rwa/attestation-batches/{id}/link` | createAttestation | Link attestations to batch |
-| `GET /rwa/attestation-batches/{id}/validate` | createAttestation | Verify batch totals |
-| `GET /rwa/attestation-batches/{id}/metrics` | createAttestation | Dashboard metrics |
-| `POST /api/webhooks/cre` | logCallback.ts (CRE) | Notify Gateway after fulfillment |
+| `POST /auth/register` | onboardRecipient | Register new Enforcer account (address + email + signature) |
+| `POST /auth/authorize` | uploadRoster, processRoster, logCallback.ts | OPA policy gate (partner check + per-wallet eligibility) |
+| `POST /admin/users` | processRoster | Create enforcer user from email (pre-provision before login) |
+| `POST /users/{user_id}/wallets` | processRoster | Provision Privy-backed wallet for user, returns address |
+| `GET /admin/users/resolve` | onboardRecipient | Resolve user by `account_address` or `email` → enforcer UUID |
+| `POST /admin/groups` | setupGroups | Create group hierarchy (`Eligible:Program:Region:tier`) |
+| `POST /admin/groups/{group_id}/users/{user_id}` | onboardRecipient | Add single user to group |
+| `POST /admin/groups/users/batch` | processRoster | Add user to multiple groups in one call |
+| `POST /storage/file/storj/upload` | uploadRoster | Upload CSV roster to Storj |
+| `GET /storage/file/storj/presigned-url` | processRoster | Time-limited download URL for stored roster |
+| `POST /storage/file/storj/move` | processRoster | Archive processed roster to `processed/` path |
+
+**RWA Gateway** (`RWA_GATEWAY_URL`):
+
+| Endpoint | Script | Purpose |
+|----------|--------|---------|
+| `POST /api/attestations` | createAttestation, logCallback.ts | Proof-of-funds / proof-of-disbursement attestation |
+| `POST /api/attestations/publish` | createAttestation, logCallback.ts | Make attestation publicly visible |
+| `GET /api/attestations/public/list` | queryAttestations | Query all public attestations for a treasury |
+| `POST /api/webhooks/cre` | logCallback.ts (CRE) | Notify Gateway after Pipeline 1/2 fulfillment |
 
 ---
 
@@ -637,13 +642,14 @@ RWA_GATEWAY_JWT=
 | Column | Description |
 |--------|-------------|
 | `phone_or_ref` | Phone number or external reference ID |
-| `address` | Wallet address (`0x...`) -- required for onchain eligibility |
+| `email` | **Primary identifier** — wallet is pre-provisioned from this via Enforcer/Privy |
 | `regionId` | Region code matching an `Eligible:Program:Region` group |
 | `eligibilityStatus` | `eligible` \| `ineligible` \| `pending` |
-| `payoutTier` | `standard` \| `priority` \| `none` |
-| `email` | Optional -- used in Enforcer profile |
+| `payoutTier` | `standard` \| `priority` |
 | `first_name` | Optional |
 | `last_name` | Optional |
+
+> **No wallet address needed in the CSV.** `processRoster` calls `POST /admin/users` (create enforcer user from email) then `POST /users/{user_id}/wallets` (provision wallet via Enforcer/Privy) for each eligible row. The returned wallet address is used for onchain eligibility registration. When the recipient later logs in via Privy with their email, Privy restores the pre-provisioned wallet — the same address already registered onchain.
 
 ---
 

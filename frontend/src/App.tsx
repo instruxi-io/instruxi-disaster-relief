@@ -15,7 +15,7 @@ const TREASURY_ABI = [
   'function claimDisbursement(bytes32 eventId) external',
   'function eligible(bytes32 eventId, address recipient) external view returns (uint8)',
   'function disbursed(bytes32 eventId, address recipient) external view returns (bool)',
-  'function getEvent(bytes32 eventId) external view returns (tuple(bytes32 id, string name, uint8 status, uint256 cap, uint256 disbursed, uint256 tierAmounts, address admin))',
+  'function getEventRecord(bytes32 eventId) external view returns (tuple(bytes32 id, string name, uint8 status, uint256 cap, uint256 disbursed, uint256 tierAmounts, address admin))',
 ]
 
 // ── Types ───────────────────────────────────────────────────────────────────

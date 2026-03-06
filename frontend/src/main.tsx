@@ -3,8 +3,8 @@ import ReactDOM from 'react-dom/client'
 import { PrivyProvider } from '@privy-io/react-auth'
 import App from './App'
 
-// Privy app ID from rwa-gateway /health
-const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID ?? 'cmeub0x4t000bk00cgumblsrs'
+const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID ?? ''
+if (!PRIVY_APP_ID) throw new Error('VITE_PRIVY_APP_ID is not set in frontend/.env')
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <PrivyProvider

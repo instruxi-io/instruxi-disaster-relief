@@ -8,8 +8,12 @@
  *   1. POST /auth/authorize            — verify caller has partner permission
  *   2. POST /storage/file/storj/upload — multipart CSV upload
  *
- * CSV schema (from playbook):
- *   phone_or_ref, address, regionId, eligibilityStatus, payoutTier, email, first_name, last_name
+ * CSV schema:
+ *   phone_or_ref, email, regionId, eligibilityStatus, payoutTier, first_name, last_name
+ *
+ * NOTE: email is the primary identifier. No wallet address needed — wallets are
+ * pre-provisioned via enforcer/Privy during processRoster. When a victim logs in
+ * with their email via Privy, their pre-provisioned wallet is restored automatically.
  *
  * Usage:
  *   npx ts-node scripts/uploadRoster.ts \
