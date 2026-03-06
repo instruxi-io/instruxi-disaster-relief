@@ -1,17 +1,15 @@
 /**
  * onboardRecipient.ts — Phase 3A (onboardRecipient wrapper)
  *
- * The single "NEEDS WRAPPER" item from the Instruxi API alignment matrix.
- * Chains three Instruxi calls into one operation:
+ * Chains enforcer-v2 calls to onboard a single recipient:
  *
- *   1. GET  /enforcer/account/exists/{address}
- *   2. POST /enforcer/auth/account/register   (if not yet registered)
- *   3. POST /profile/multi-create             (create/update profile)
- *   4. POST /admin/groups/account/add-multiple (assign to eligible groups)
+ *   1. POST /auth/register           — register account (idempotent: catches 409)
+ *   2. GET  /admin/users/resolve     — resolve wallet → UUID (needed for groups)
+ *   3. POST /admin/groups/users/batch — assign to eligible groups
  *
  * Use for individual recipients. For batch ingestion, processRoster.ts handles
- * profile creation and group assignment — but Enforcer account registration must
- * be done separately (this script or frontend SIWE) before processRoster runs.
+ * group assignment — but account registration must be done separately (this
+ * script or frontend SIWE) before processRoster runs.
  *
  * Usage (single recipient):
  *   npx ts-node scripts/onboardRecipient.ts \
@@ -27,15 +25,18 @@
  * Note on signature:
  *   The Enforcer registration requires an ECDSA signature of the account_address.
  *   For backend / service-key registration, sign with your admin/service private key.
- *   Message format: keccak256(account_address) — verify with your Enforcer instance.
+ *   Message format: verify with your Enforcer instance (typically EIP-191 personal_sign).
+ *
+ * Note on group IDs:
+ *   Group IDs are enforcer-v2 UUIDs returned by setupGroups.ts.
+ *   User IDs used for group assignment are also UUIDs (resolved from wallet address).
  */
 
 import "dotenv/config";
 import {
-  accountExists,
   registerAccount,
-  multiCreateProfiles,
-  addAccountToGroups,
+  resolveUser,
+  addUserToGroups,
 } from "./instruxi";
 
 export interface OnboardInput {
@@ -51,15 +52,15 @@ export interface OnboardInput {
 
 export interface OnboardResult {
   address: string;
-  registered: boolean;   // true = newly registered, false = already existed
-  profiled: boolean;
+  userId?: string;           // enforcer-v2 UUID (needed for group ops)
+  registered: boolean;       // true = newly registered
   grouped: boolean;
   error?: string;
 }
 
 /**
- * Onboard a single recipient into Instruxi Enforcer.
- * Safe to call multiple times — existence check prevents duplicate registration.
+ * Onboard a single recipient into Enforcer-v2.
+ * Registration is attempted; 409 (already exists) is treated as success.
  */
 export async function onboardRecipient(
   input: OnboardInput
@@ -67,16 +68,12 @@ export async function onboardRecipient(
   const result: OnboardResult = {
     address: input.address,
     registered: false,
-    profiled: false,
     grouped: false,
   };
 
   try {
-    // Step 1: Check if account already exists
-    const exists = await accountExists(input.address);
-
-    if (!exists) {
-      // Step 2: Register account
+    // Step 1: Register account (idempotent)
+    try {
       await registerAccount(
         input.address,
         input.email,
@@ -90,29 +87,28 @@ export async function onboardRecipient(
       );
       result.registered = true;
       console.log(`  [register]  ${input.address} ✓`);
-    } else {
-      console.log(`  [register]  ${input.address} (already exists)`);
+    } catch (regErr) {
+      const msg = regErr instanceof Error ? regErr.message : String(regErr);
+      if (msg.includes("409") || msg.toLowerCase().includes("already")) {
+        console.log(`  [register]  ${input.address} (already exists)`);
+      } else {
+        throw regErr;
+      }
     }
 
-    // Step 3: Create/update profile
-    await multiCreateProfiles([
-      {
-        account_address: input.address,
-        email: input.email,
-        first_name: input.firstName,
-        last_name: input.lastName,
-        phone_number: input.phoneNumber,
-        username: input.username,
-      },
-    ]);
-    result.profiled = true;
-    console.log(`  [profile]   ${input.address} ✓`);
+    // Step 2: Resolve wallet → enforcer UUID (needed for group assignment)
+    const user = await resolveUser(input.address);
+    if (!user?.id) {
+      throw new Error(`Could not resolve UUID for address ${input.address}`);
+    }
+    result.userId = user.id;
+    console.log(`  [resolve]   ${input.address} → UUID ${user.id}`);
 
-    // Step 4: Assign to groups
+    // Step 3: Assign to groups
     if (input.groupIds.length > 0) {
-      await addAccountToGroups(input.address, input.groupIds);
+      await addUserToGroups(user.id, input.groupIds);
       result.grouped = true;
-      console.log(`  [groups]    ${input.address} → [${input.groupIds.join(", ")}] ✓`);
+      console.log(`  [groups]    ${user.id} → [${input.groupIds.join(", ")}] ✓`);
     }
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err);
@@ -140,7 +136,7 @@ async function main() {
     console.error(
       "Usage: ts-node scripts/onboardRecipient.ts \\\n" +
       "  --address <0x...> --email <email> --signature <0x...> \\\n" +
-      "  --group-ids <id1,id2> [--first-name X] [--last-name Y] [--phone +1...]"
+      "  --group-ids <uuid1,uuid2> [--first-name X] [--last-name Y] [--phone +1...]"
     );
     process.exit(1);
   }

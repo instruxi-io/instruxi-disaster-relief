@@ -13,7 +13,7 @@
  *
  *   "eligibility_registration":
  *     1. Decode eventId, candidate addresses[], claimed tiers[] from requestData
- *     2. For each candidate: POST /enforcer/auth/authorize (OPA policy check)
+ *     2. For each candidate: POST /auth/authorize (OPA policy check)
  *     3. Collect only the OPA-approved addresses and their claimed tiers
  *     4. Write result via onReport(metadata, 0x02 + abi.encode(requestId, approvedAddrs[], tiers[]))
  *     5. Contract stores _eligible[eventId][addr] = tier for each approved recipient
@@ -219,7 +219,7 @@ function applyConsensus(
  *
  * Returns true if OPA approves. Throws on 5xx / 401 / 403 / network errors
  * so the DON retries the entire eligibility batch rather than silently skipping.
- * Returns false only on definitive 200 { allowed: false }.
+ * Returns false only on definitive 200 { allow: false }.
  */
 function checkRecipientEligibility(
   runtime: Runtime<WorkflowConfig>,
@@ -234,7 +234,7 @@ function checkRecipientEligibility(
 
   const authRes = http.request(runtime, {
     method: "POST",
-    url: `${baseUrl}/enforcer/auth/authorize`,
+    url: `${baseUrl}/auth/authorize`,
     headers: {
       "Content-Type": "application/json",
       "x-api-key": apiKey,
@@ -254,9 +254,9 @@ function checkRecipientEligibility(
     throw new Error(`[OPA] Auth error ${authRes.statusCode} — check INSTRUXI_API_KEY`);
   }
 
-  const authBody = JSON.parse(authRes.body) as { allowed: boolean };
-  runtime.log(`[OPA] ${recipient} → allowed=${authBody.allowed}`);
-  return authBody.allowed;
+  const authBody = JSON.parse(authRes.body) as { allow: boolean };
+  runtime.log(`[OPA] ${recipient} → allow=${authBody.allow}`);
+  return authBody.allow;
 }
 
 // ── Notify RWA Gateway via CRE webhook ────────────────────────────────────
@@ -469,8 +469,8 @@ function handleEligibilityRegistration(
 // ── Instruxi attestation helpers (direct API — no onchain write) ──────────
 
 /**
- * Create a TrustSync attestation via the Instruxi API.
- * POST /rwa/attestation/create
+ * Create a TrustSync attestation via the RWA Gateway.
+ * POST /api/attestations
  * Returns the attestation ID string.
  * Throws on 5xx (DON retries) or 401/403 (misconfiguration).
  */
@@ -489,18 +489,16 @@ function createInstruxiAttestation(
     active: boolean;
   }
 ): string {
-  const { baseUrl } = runtime.config.instruxi;
+  const { rwGatewayUrl } = runtime.config.instruxi;
   const secrets = runtime.secrets();
-  const apiKey   = (secrets["INSTRUXI_API_KEY"]   as string) ?? "";
   const adminJwt = (secrets["INSTRUXI_ADMIN_JWT"] as string) ?? "";
 
   const http = new cre.capabilities.HTTPCapability();
   const res = http.request(runtime, {
     method: "POST",
-    url: `${baseUrl}/rwa/attestation/create`,
+    url: `${rwGatewayUrl}/api/attestations`,
     headers: {
       "Content-Type":  "application/json",
-      "x-api-key":     apiKey,
       "Authorization": `Bearer ${adminJwt}`,
     },
     body: JSON.stringify(body),
@@ -521,25 +519,23 @@ function createInstruxiAttestation(
 
 /**
  * Publish an attestation (make it publicly visible).
- * POST /rwa/attestation/publish
+ * POST /api/attestations/publish
  * Throws on 5xx so the DON retries.
  */
 function publishInstruxiAttestation(
   runtime: Runtime<WorkflowConfig>,
   attestationId: string
 ): void {
-  const { baseUrl } = runtime.config.instruxi;
+  const { rwGatewayUrl } = runtime.config.instruxi;
   const secrets = runtime.secrets();
-  const apiKey   = (secrets["INSTRUXI_API_KEY"]   as string) ?? "";
   const adminJwt = (secrets["INSTRUXI_ADMIN_JWT"] as string) ?? "";
 
   const http = new cre.capabilities.HTTPCapability();
   const res = http.request(runtime, {
     method: "POST",
-    url: `${baseUrl}/rwa/attestation/publish`,
+    url: `${rwGatewayUrl}/api/attestations/publish`,
     headers: {
       "Content-Type":  "application/json",
-      "x-api-key":     apiKey,
       "Authorization": `Bearer ${adminJwt}`,
     },
     body: JSON.stringify({ id: attestationId }),

@@ -1,15 +1,23 @@
 /**
  * instruxi.ts
  *
- * Typed HTTP client for the Instruxi API (gateway-staging.instruxi.dev/api/v1).
- * Covers every endpoint used by the disaster-relief pipeline:
- *   - Enforcer: register, exists, authorize, groups
- *   - Profile: multi-create
- *   - Object Storage: upload, metadata, presigned-url, move
- *   - RWA attestations: create, publish, batches, link, validate, metrics
+ * Typed HTTP client for the Instruxi API stack.
  *
- * Auth: x-api-key header for storage/attestation endpoints;
- *       Authorization: Bearer <jwt> for group/profile admin endpoints.
+ * Enforcer-v2  (enforcer-v2-dev.instruxi.dev/api/v1/enforcer):
+ *   - Auth: register, authorize (OPA)
+ *   - Admin Groups: create, add user, batch add, list, remove
+ *   - Storage (Storj): upload, presigned-url, move
+ *
+ * RWA Gateway (rwa-gateway.instruxi.dev):
+ *   - Attestations: create, publish
+ *   - CRE webhook: notify
+ *
+ * Auth: Authorization: Bearer <adminJwt> on all requests.
+ *       x-api-key accepted as alternative on some endpoints.
+ *
+ * IMPORTANT — User IDs in enforcer-v2:
+ *   Group operations use UUID user IDs, not wallet addresses.
+ *   Obtain the UUID from the registration response or resolveUser().
  *
  * All functions throw on non-2xx responses.
  */
@@ -17,18 +25,20 @@
 // ── Config ────────────────────────────────────────────────────────────────
 
 export interface InstruxiConfig {
-  baseUrl: string;       // e.g. https://gateway-staging.instruxi.dev/api/v1
-  apiKey: string;        // INSTRUXI_API_KEY (x-api-key header)
-  adminJwt: string;      // INSTRUXI_ADMIN_JWT (Bearer token for admin ops)
+  baseUrl: string;       // https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer
+  rwGatewayUrl: string;  // https://rwa-gateway.instruxi.dev
+  apiKey: string;        // INSTRUXI_API_KEY
+  adminJwt: string;      // INSTRUXI_ADMIN_JWT
   tenantId: string;      // INSTRUXI_TENANT_ID
 }
 
 function cfg(): InstruxiConfig {
   return {
-    baseUrl:  process.env.INSTRUXI_BASE_URL  || "https://gateway-staging.instruxi.dev/api/v1",
-    apiKey:   process.env.INSTRUXI_API_KEY   || "",
-    adminJwt: process.env.INSTRUXI_ADMIN_JWT || "",
-    tenantId: process.env.INSTRUXI_TENANT_ID || "",
+    baseUrl:      process.env.INSTRUXI_BASE_URL  || "https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer",
+    rwGatewayUrl: process.env.RWA_GATEWAY_URL    || "https://rwa-gateway.instruxi.dev",
+    apiKey:       process.env.INSTRUXI_API_KEY   || "",
+    adminJwt:     process.env.INSTRUXI_ADMIN_JWT || "",
+    tenantId:     process.env.INSTRUXI_TENANT_ID || "",
   };
 }
 
@@ -60,6 +70,31 @@ async function req<T>(
   return json;
 }
 
+async function gatewayReq<T>(
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<T> {
+  const c = cfg();
+  const url = `${c.rwGatewayUrl}${path}`;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${c.adminJwt}`,
+  };
+
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const json = await res.json() as T;
+  if (!res.ok) {
+    throw new Error(`RWA Gateway ${method} ${path} → ${res.status}: ${JSON.stringify(json)}`);
+  }
+  return json;
+}
+
 // ── Response types ────────────────────────────────────────────────────────
 
 export interface ApiResponse<T = unknown> {
@@ -72,49 +107,23 @@ export interface ApiResponse<T = unknown> {
 export interface GroupRecord {
   id: string;
   name: string;
-  tenant_id: string;
-  note?: string;
+  description?: string;
+  tenant_id?: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
-export interface AttestationRecord {
-  id: string;
-  account_address: string;
-  asset_contract_address: string;
-  fractional_amount: number;
-  fractional_unit: string;
-  chain_id: number;
-  public: boolean;
-  active: boolean;
-}
-
-export interface AttestationBatch {
-  id: string;
-  asset_contract_address: string;
-  total_amount: number;
-  auditor_account_address: string;
-}
-
-// ── Enforcer: Account ─────────────────────────────────────────────────────
+// ── Enforcer-v2: Auth ─────────────────────────────────────────────────────
 
 /**
- * Check whether an Enforcer account exists for a wallet address.
- * GET /enforcer/account/exists/{account_address}
- */
-export async function accountExists(address: string): Promise<boolean> {
-  const res = await req<ApiResponse<{ exists: boolean }>>(
-    "GET", `/enforcer/account/exists/${address}`
-  );
-  return !!(res.data?.exists);
-}
-
-/**
- * Register a new Enforcer account.
- * POST /enforcer/auth/account/register
+ * Register a new account in Enforcer-v2.
+ * POST /auth/register
  *
- * @param address  Wallet address
- * @param email    Email address (required by Enforcer)
- * @param signature ECDSA signature — use service key for backend registration
- * @param opts     Optional fields: first_name, last_name, phone_number, username, tenant_code
+ * @param address   Wallet address (account_address)
+ * @param email     Email address
+ * @param signature ECDSA signature for verification
+ * @param opts      Optional profile fields
+ * @returns         User record including the UUID `id` needed for group operations
  */
 export async function registerAccount(
   address: string,
@@ -127,8 +136,8 @@ export async function registerAccount(
     username?: string;
     tenant_code?: string;
   } = {}
-): Promise<ApiResponse> {
-  return req("POST", "/enforcer/auth/account/register", {
+): Promise<ApiResponse<Record<string, string>>> {
+  return req("POST", "/auth/register", {
     account_address: address,
     email,
     signature,
@@ -136,159 +145,158 @@ export async function registerAccount(
   });
 }
 
-// ── Enforcer: Auth ────────────────────────────────────────────────────────
-
 /**
- * Authorize an action on a resource via OPA Rego policy.
- * POST /enforcer/auth/authorize
- * Returns the full OPA response (always contains at minimum { allowed: boolean })
+ * Authorize an action via OPA Rego policy.
+ * POST /auth/authorize
+ *
+ * Response contains `allow` (boolean), `message`, `reason`.
+ * NOTE: The field is `allow`, not `allowed`.
  */
 export async function authorize(
   policyId: string,
-  input: Record<string, unknown>
-): Promise<ApiResponse<Record<string, unknown>>> {
-  return req<ApiResponse<Record<string, unknown>>>(
-    "POST", "/enforcer/auth/authorize",
-    { policy_id: policyId, input }
+  input: {
+    action?: string;
+    user_id?: string;
+    resource?: string;
+    resource_type?: string;
+    resource_metadata?: Record<string, unknown>;
+    contexts?: string[];
+    [key: string]: unknown;
+  }
+): Promise<{ allow: boolean; message?: string; reason?: string }> {
+  const res = await req<{ allow: boolean; message?: string; reason?: string }>(
+    "POST", "/auth/authorize",
+    { policy_id: policyId, ...input }
   );
+  return res;
 }
 
 /**
- * Batch authorize multiple actions.
- * POST /enforcer/auth/authorize/batch
+ * Resolve a wallet address to the user's enforcer-v2 UUID.
+ * GET /admin/users/resolve?account_address={address}
+ *
+ * Group operations require the UUID user ID, not the wallet address.
+ * Call this after registration if you only have the wallet address.
  */
-export async function authorizeBatch(
-  policyId: string,
-  requests: Array<Record<string, unknown>>,
-  contexts?: Array<Record<string, unknown>>
-): Promise<ApiResponse<unknown[]>> {
-  return req("POST", "/enforcer/auth/authorize/batch", {
-    policy_id: policyId,
-    requests,
-    ...(contexts ? { contexts } : {}),
-  });
+export async function resolveUser(
+  accountAddress: string
+): Promise<{ id: string; account_address: string } | null> {
+  try {
+    const res = await req<ApiResponse<{ id: string; account_address: string }>>(
+      "GET", `/admin/users/resolve?account_address=${encodeURIComponent(accountAddress)}`
+    );
+    return res.data ?? null;
+  } catch {
+    return null;
+  }
 }
 
-// ── Enforcer: Groups ──────────────────────────────────────────────────────
+// ── Enforcer-v2: Admin Groups ─────────────────────────────────────────────
 
 /**
  * Create a new Enforcer group.
- * POST /admin/groups/create
+ * POST /admin/groups
  */
 export async function createGroup(
   name: string,
-  note?: string
+  description?: string
 ): Promise<ApiResponse<GroupRecord>> {
-  return req("POST", "/admin/groups/create", {
+  return req("POST", "/admin/groups", {
     name,
     tenant_id: cfg().tenantId,
-    ...(note ? { note } : {}),
+    ...(description ? { description } : {}),
   });
 }
 
 /**
- * Add a single account to a single group.
- * POST /admin/groups/add-account
+ * Add a single user to a single group.
+ * POST /admin/groups/{group_id}/users/{user_id}
+ *
+ * Both IDs are enforcer-v2 UUIDs. Use resolveUser() to get the user UUID
+ * from a wallet address if needed.
  */
-export async function addAccountToGroup(
-  accountAddress: string,
+export async function addUserToGroup(
+  userId: string,
   groupId: string
 ): Promise<ApiResponse> {
-  return req("POST", "/admin/groups/add-account", {
-    account_address: accountAddress,
+  return req("POST", `/admin/groups/${groupId}/users/${userId}`, {
+    user_id: userId,
     group_id: groupId,
   });
 }
 
 /**
- * Add a single account to multiple groups in one call.
- * POST /admin/groups/account/add-multiple
+ * Add a single user to multiple groups in one call.
+ * POST /admin/groups/users/batch
+ *
+ * @param userId   Enforcer-v2 UUID for the user
+ * @param groupIds Array of enforcer-v2 group UUIDs
  */
-export async function addAccountToGroups(
-  accountAddress: string,
+export async function addUserToGroups(
+  userId: string,
   groupIds: string[]
 ): Promise<ApiResponse> {
-  return req("POST", "/admin/groups/account/add-multiple", {
-    account_address: accountAddress,
+  return req("POST", "/admin/groups/users/batch", {
+    user_id: userId,
     group_ids: groupIds,
   });
 }
 
 /**
- * Get all groups a wallet address belongs to.
- * GET /admin/groups/account/{account_address}/groups
- * Returns array of group name strings in data.
+ * Get all groups a user belongs to.
+ * GET /admin/groups/user/{user_id}/groups
+ *
+ * @param userId Enforcer-v2 UUID for the user
  */
-export async function getAccountGroups(address: string): Promise<string[]> {
-  const res = await req<ApiResponse<string[]>>(
-    "GET", `/admin/groups/account/${address}/groups`
+export async function getUserGroups(userId: string): Promise<GroupRecord[]> {
+  const res = await req<ApiResponse<GroupRecord[]>>(
+    "GET", `/admin/groups/user/${userId}/groups`
   );
   return res.data ?? [];
 }
 
 /**
- * Remove an account from a group.
- * POST /admin/groups/remove-account
+ * Remove a user from a group.
+ * DELETE /admin/groups/{group_id}/users/{user_id}
  */
-export async function removeAccountFromGroup(
-  accountAddress: string,
+export async function removeUserFromGroup(
+  userId: string,
   groupId: string
 ): Promise<ApiResponse> {
-  return req("POST", "/admin/groups/remove-account", {
-    account_address: accountAddress,
-    group_id: groupId,
-  });
+  return req("DELETE", `/admin/groups/${groupId}/users/${userId}`);
 }
 
-// ── Profile ───────────────────────────────────────────────────────────────
-
-export interface RawAccount {
-  account_address: string;
-  email?: string;
-  first_name?: string;
-  last_name?: string;
-  phone_number?: string;
-  username?: string;
-  tenant_id?: string;
-}
+// ── Enforcer-v2: Storage (Storj) ──────────────────────────────────────────
 
 /**
- * Batch-create profiles for multiple accounts.
- * POST /profile/multi-create
- */
-export async function multiCreateProfiles(
-  accounts: RawAccount[]
-): Promise<ApiResponse<RawAccount[]>> {
-  return req("POST", "/profile/multi-create", { accounts });
-}
-
-// ── Object Storage ────────────────────────────────────────────────────────
-
-/**
- * Upload a file to Instruxi Object Storage.
- * POST /os/file/upload  (multipart/form-data)
+ * Upload a file to Instruxi Object Storage (Storj).
+ * POST /storage/file/storj/upload  (multipart/form-data)
+ *
+ * The Storj bucket is configured server-side — no bucket_name needed.
  *
  * @param fileBuffer  File content as Buffer
  * @param fileName    File name (e.g. "roster-2026-001.csv")
  * @param fileType    MIME type (e.g. "text/csv")
+ * @param directory   Optional directory path within the bucket
  * @param policyId    Optional Enforcer policy ID for access gating
- * @returns           Object with file_id
+ * @returns           Object with file_id and object_key (Storj path)
  */
 export async function uploadFile(
   fileBuffer: Buffer,
   fileName: string,
   fileType: string,
+  directory?: string,
   policyId?: string
-): Promise<{ file_id: string }> {
+): Promise<{ file_id: string; object_key: string }> {
   const c = cfg();
   const form = new FormData();
   const blob = new Blob([new Uint8Array(fileBuffer)], { type: fileType });
   form.append("file", blob, fileName);
-  form.append("file_name", fileName);
   form.append("file_type", fileType);
+  if (directory) form.append("directory", directory);
   if (policyId) form.append("policy_id", policyId);
 
-  const res = await fetch(`${c.baseUrl}/os/file/upload`, {
+  const res = await fetch(`${c.baseUrl}/storage/file/storj/upload`, {
     method: "POST",
     headers: {
       "x-api-key": c.apiKey,
@@ -297,142 +305,84 @@ export async function uploadFile(
     body: form,
   });
 
-  const json = await res.json() as { file_id: string };
+  const json = await res.json() as ApiResponse<{ file_id: string }>;
   if (!res.ok) throw new Error(`uploadFile → ${res.status}: ${JSON.stringify(json)}`);
-  return json;
+  // Compute the object_key locally (mirrors server-side path construction)
+  const object_key = directory ? `${directory}/${fileName}` : fileName;
+  const file_id = (json.data as { file_id: string }).file_id;
+  return { file_id, object_key };
 }
 
 /**
- * Update metadata for an uploaded file.
- * POST /os/file/metadata
- */
-export async function updateFileMetadata(
-  fileId: string,
-  opts: {
-    file_type?: string;
-    policy_id?: number;
-    status?: string;
-    version?: string;
-  }
-): Promise<ApiResponse> {
-  return req("POST", "/os/file/metadata", { file_id: fileId, ...opts });
-}
-
-/**
- * Generate a presigned download URL for a file.
- * GET /storage/file/presigned-url?file_id={id}&expire={seconds}
+ * Generate a presigned download URL for a Storj file.
+ * GET /storage/file/storj/presigned-url?object_key={key}&expiry={seconds}
+ *
+ * @param objectKey     The file's object key/path in Storj
+ * @param expireSeconds URL expiry time (default 3600, max 604800)
  */
 export async function getPresignedUrl(
-  fileId: string,
+  objectKey: string,
   expireSeconds = 3600
 ): Promise<string> {
   const c = cfg();
-  const url = `${c.baseUrl}/storage/file/presigned-url?file_id=${encodeURIComponent(fileId)}&expire=${expireSeconds}`;
+  const url = `${c.baseUrl}/storage/file/storj/presigned-url?object_key=${encodeURIComponent(objectKey)}&expiry=${expireSeconds}`;
   const res = await fetch(url, {
-    headers: { "x-api-key": c.apiKey },
+    headers: {
+      "x-api-key": c.apiKey,
+      "Authorization": `Bearer ${c.adminJwt}`,
+    },
   });
-  const json = await res.json() as ApiResponse<string>;
+  const json = await res.json() as ApiResponse<{ url: string }>;
   if (!res.ok) throw new Error(`getPresignedUrl → ${res.status}: ${JSON.stringify(json)}`);
-  return json.data as string;
+  return json.data?.url ?? "";
 }
 
 /**
- * Move/archive a file to a different path/bucket.
- * POST /storage/file/move
+ * Move/rename a file within Storj storage.
+ * POST /storage/file/storj/move
  */
 export async function moveFile(
-  fileId: string,
-  destinationPath: string
+  bucketName: string,
+  sourceKey: string,
+  destinationKey: string,
+  destBucketName?: string
 ): Promise<ApiResponse> {
-  return req("POST", "/storage/file/move", {
-    file_id: fileId,
-    destination_path: destinationPath,
+  return req("POST", "/storage/file/storj/move", {
+    bucket_name: bucketName,
+    source_key: sourceKey,
+    destination_key: destinationKey,
+    ...(destBucketName ? { dest_bucket_name: destBucketName } : {}),
   });
 }
 
-// ── RWA Attestations ──────────────────────────────────────────────────────
+// ── RWA Attestations (rwa-gateway.instruxi.dev) ───────────────────────────
 
 export interface CreateAttestationInput {
-  account_address: string;
-  asset_contract_address: string;       // ReliefTreasury address
-  fractional_amount: number;            // USDC balance (in token units)
-  fractional_decimals: number;          // 6 for USDC
-  fractional_token_contract_address: string; // USDC contract address
-  fractional_unit: string;              // "USDC"
-  token_id: number;                     // 0 for treasury attestation
-  chain_id?: number;
-  blockchain_id?: string;
-  attestation_batch_id?: string;
-  public?: boolean;
+  contract_deployment_id: number;    // registered contract deployment ID
+  attestation_type: string;          // "net_asset_value" | "proof_of_reserve"
+  attestor_name: string;
+  attestor_entity?: string;
+  attestor_wallet_address?: string;
+  attestation_data: string;          // EIP-712 typed data JSON string
+  nonce?: string;                    // from POST /api/admin/attestations/nonce
+  signature?: string;                // EIP-712 signature (0x-prefixed hex)
   active?: boolean;
 }
 
 /**
- * Create a TrustSync attestation (proof-of-funds or proof-of-disbursement).
- * POST /rwa/attestation/create
+ * Create a TrustSync attestation via the RWA Gateway.
+ * POST /api/attestations
  */
 export async function createAttestation(
   input: CreateAttestationInput
 ): Promise<ApiResponse<{ id: string }>> {
-  return req("POST", "/rwa/attestation/create", input);
+  return gatewayReq("POST", "/api/attestations", input);
 }
 
 /**
  * Publish an attestation (make it publicly visible).
- * POST /rwa/attestation/publish
+ * POST /api/attestations/publish
  */
-export async function publishAttestation(id: string): Promise<ApiResponse> {
-  return req("POST", "/rwa/attestation/publish", { id });
-}
-
-export interface CreateBatchInput {
-  asset_contract_address: string;
-  fractional_token_contract_address: string;
-  total_amount: number;
-  audit_timestamp: string;              // ISO string
-  auditor_account_address: string;
-  auditor_signature: string;
-  chain_id?: number;
-  blockchain_id?: string;
-  active?: boolean;
-}
-
-/**
- * Create an attestation batch (groups multiple disbursement proofs).
- * POST /rwa/attestation-batches
- */
-export async function createAttestationBatch(
-  input: CreateBatchInput
-): Promise<ApiResponse<{ id: string }>> {
-  return req("POST", "/rwa/attestation-batches", input);
-}
-
-/**
- * Link unlinked attestations into a batch.
- * POST /rwa/attestation-batches/{id}/link
- */
-export async function linkAttestationsToBatch(
-  batchId: string
-): Promise<ApiResponse> {
-  return req("POST", `/rwa/attestation-batches/${batchId}/link`);
-}
-
-/**
- * Validate that attestation totals match the batch total.
- * GET /rwa/attestation-batches/{id}/validate
- */
-export async function validateAttestationBatch(
-  batchId: string
-): Promise<ApiResponse<{ valid: boolean; total: number }>> {
-  return req("GET", `/rwa/attestation-batches/${batchId}/validate`);
-}
-
-/**
- * Get metrics summary for an attestation batch.
- * GET /rwa/attestation-batches/{id}/metrics
- */
-export async function getAttestationBatchMetrics(
-  batchId: string
-): Promise<ApiResponse<Record<string, unknown>>> {
-  return req("GET", `/rwa/attestation-batches/${batchId}/metrics`);
+export async function publishAttestation(id: string | number): Promise<ApiResponse> {
+  return gatewayReq("POST", "/api/attestations/publish", { id });
 }

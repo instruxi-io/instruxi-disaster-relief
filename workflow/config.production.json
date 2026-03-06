@@ -3,9 +3,9 @@
   "chainSelectorName": "ethereum-mainnet",
   "gasLimit": "500000",
   "instruxi": {
-    "baseUrl": "https://api.instruxi.io",
+    "baseUrl": "https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer",
     "eligibilityGroupPrefix": "Eligible:",
-    "rwGatewayUrl": "https://gateway.instruxi.io",
+    "rwGatewayUrl": "https://rwa-gateway.instruxi.dev",
     "policyId": ""
   }
 }

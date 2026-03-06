@@ -5,9 +5,8 @@
  * Enforcer policy-gates the upload: only Partners:ProgramX members can upload.
  *
  * Pipeline:
- *   1. POST /enforcer/auth/authorize  — verify caller has partner permission
- *   2. POST /os/file/upload           — multipart CSV upload
- *   3. POST /os/file/metadata         — tag with programId, regionId, timestamp
+ *   1. POST /auth/authorize            — verify caller has partner permission
+ *   2. POST /storage/file/storj/upload — multipart CSV upload
  *
  * CSV schema (from playbook):
  *   phone_or_ref, address, regionId, eligibilityStatus, payoutTier, email, first_name, last_name
@@ -26,10 +25,11 @@
 
 import "dotenv/config";
 import { readFileSync } from "fs";
-import { authorize, uploadFile, updateFileMetadata } from "./instruxi";
+import { authorize, uploadFile } from "./instruxi";
 
 export interface UploadRosterResult {
   fileId: string;
+  objectKey: string;   // Storj object key — pass to processRoster as --object-key
   program: string;
   region: string;
   fileName: string;
@@ -54,8 +54,7 @@ export async function uploadRoster(opts: {
       program,
       subject: opts.callerAddress,
     });
-    const isAllowed = !!(res.data?.["allowed"] ?? (res as any).allowed);
-    if (!isAllowed) {
+    if (!res.allow) {
       throw new Error(`Unauthorized: caller ${opts.callerAddress} is not permitted to upload rosters for ${program}`);
     }
     console.log("[authorize] ✓ Permitted");
@@ -66,19 +65,11 @@ export async function uploadRoster(opts: {
   const fileName = `${program}_${region}_${Date.now()}.csv`;
   console.log(`[upload] Uploading ${fileName} (${buffer.length} bytes)...`);
 
-  const { file_id: fileId } = await uploadFile(buffer, fileName, "text/csv", storagePolicyId);
-  console.log(`[upload] ✓ file_id: ${fileId}`);
+  const { file_id: fileId, object_key: objectKey } = await uploadFile(buffer, fileName, "text/csv", program, storagePolicyId);
+  console.log(`[upload] ✓ file_id: ${fileId}  object_key: ${objectKey}`);
 
-  // Step 3: Tag with metadata
   const uploadedAt = new Date().toISOString();
-  await updateFileMetadata(fileId, {
-    file_type: "text/csv",
-    status:    "pending",
-    version:   "1",
-  });
-  console.log(`[metadata] ✓ Tagged: program=${program} region=${region} status=pending`);
-
-  return { fileId, program, region, fileName, uploadedAt };
+  return { fileId, objectKey, program, region, fileName, uploadedAt };
 }
 
 // ── CLI entry point ───────────────────────────────────────────────────────
@@ -114,7 +105,7 @@ async function main() {
 
   console.log("\nUpload complete:");
   console.log(JSON.stringify(result, null, 2));
-  console.log("\nNext step: run processRoster.ts with --file-id", result.fileId);
+  console.log("\nNext step: run processRoster.ts with --object-key", result.objectKey);
 }
 
 main().catch((err) => {

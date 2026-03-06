@@ -10,7 +10,7 @@
  */
 
 export interface GatewayConfig {
-  gatewayUrl: string;    // e.g. https://rwa-gateway-staging.instruxi.dev
+  gatewayUrl: string;    // e.g. https://rwa-gateway.instruxi.dev
   gatewayJwt: string;    // RWA_GATEWAY_JWT (Bearer token)
 }
 

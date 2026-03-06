@@ -98,9 +98,9 @@ Open `workflow/config.staging.json` and fill in all placeholders:
   "usdcAddress": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
   "chainId": 11155111,
   "instruxi": {
-    "baseUrl": "https://gateway-staging.instruxi.dev/api/v1",
+    "baseUrl": "https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer",
     "eligibilityGroupPrefix": "Eligible:",
-    "rwGatewayUrl": "https://rwa-gateway-staging.instruxi.dev",
+    "rwGatewayUrl": "https://rwa-gateway.instruxi.dev",
     "policyId": "<YOUR_INSTRUXI_POLICY_ID>"
   }
 }

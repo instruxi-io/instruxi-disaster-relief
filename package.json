@@ -13,7 +13,9 @@
     "upload-roster": "ts-node scripts/uploadRoster.ts",
     "process-roster": "ts-node scripts/processRoster.ts",
     "attest": "ts-node scripts/createAttestation.ts",
-    "query-attestations": "ts-node scripts/queryAttestations.ts"
+    "query-attestations": "ts-node scripts/queryAttestations.ts",
+    "frontend": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",

@@ -2,16 +2,15 @@
  * processRoster.ts — Phase 4
  *
  * Admin-triggered roster ingestion pipeline. Fetches a CSV from Instruxi
- * Object Storage via presigned URL, validates schema, onboards each eligible
- * recipient into the correct tier-based Enforcer group, and archives the file.
+ * Object Storage via presigned URL, validates schema, and onboards each
+ * eligible recipient into the correct tier-based Enforcer group.
  *
- * Pipeline (matches playbook steps 18-25):
- *   1. POST /enforcer/auth/authorize        — verify admin permission
- *   2. GET  /storage/file/presigned-url     — get time-limited download URL
- *   3. Fetch + parse CSV                    — validate schema, split eligible/rejected
- *   4. POST /profile/multi-create           — batch create profiles
- *   5. POST /admin/groups/account/add-multiple — assign eligible recipients to tier group
- *   6. POST /storage/file/move              — archive processed file
+ * Pipeline:
+ *   1. POST /auth/authorize             — verify admin permission
+ *   2. GET  /storage/file/storj/presigned-url — time-limited download URL
+ *   3. Fetch + parse CSV               — validate schema, split eligible/rejected
+ *   4. For each eligible: GET /admin/users/resolve + POST /admin/groups/users/batch
+ *   5. POST /storage/file/storj/move   — archive processed file
  *
  * NOTE — Enforcer account registration is NOT performed here.
  * registerAccount() requires an ECDSA signature per wallet, which is impractical
@@ -21,8 +20,8 @@
  * If a wallet is not registered in Enforcer, OPA will deny it during the CRE
  * eligibility_registration pipeline (logCallback.ts checkRecipientEligibility).
  *
- * CSV columns (from playbook):
- *   phone_or_ref, regionId, eligibilityStatus, payoutTier
+ * CSV columns:
+ *   phone_or_ref, address, regionId, eligibilityStatus, payoutTier, email, first_name, last_name
  *
  * payoutTier values map to Enforcer groups:
  *   "standard" → tier 1 → Eligible:Program:Region:1
@@ -30,13 +29,13 @@
  *
  * Usage:
  *   npx ts-node scripts/processRoster.ts \
- *     --file-id <instruxi-file-id> \
+ *     --object-key <storj-object-key> \
  *     --program US-FLOOD-2026 \
  *     --region US-CA \
- *     --tier-group-ids '{"1":"groupId_standard","2":"groupId_priority"}' \
+ *     --tier-group-ids '{"1":"groupUUID_standard","2":"groupUUID_priority"}' \
  *     --policy-id <enforcer-admin-policy-id> \
  *     --caller-address 0xAdminAddress \
- *     [--archive-path processed/]
+ *     [--bucket-name <storj-bucket>] [--archive-path processed/]
  *
  * Required env vars:
  *   INSTRUXI_BASE_URL, INSTRUXI_API_KEY, INSTRUXI_ADMIN_JWT, INSTRUXI_TENANT_ID
@@ -47,18 +46,17 @@ import { createHash } from "crypto";
 import {
   authorize,
   getPresignedUrl,
-  multiCreateProfiles,
-  addAccountToGroups,
+  resolveUser,
+  addUserToGroups,
   moveFile,
-  type RawAccount,
 } from "./instruxi";
 
 // ── CSV Schema ────────────────────────────────────────────────────────────
 
 interface RosterRow {
-  phone_or_ref: string;        // Phone number or external reference ID
+  phone_or_ref: string;
   address: string;             // Wallet address (required for onchain eligibility)
-  regionId: string;            // ISO/program region code
+  regionId: string;
   eligibilityStatus: string;   // "eligible" | "ineligible" | "pending"
   payoutTier: string;          // e.g. "standard", "priority"
   email?: string;
@@ -117,7 +115,7 @@ function parseCSV(raw: string): { rows: RosterRow[]; errors: string[] } {
 // ── Processing ────────────────────────────────────────────────────────────
 
 export interface ProcessRosterResult {
-  fileId: string;
+  objectKey: string;
   program: string;
   region: string;
   totalRows: number;
@@ -136,26 +134,28 @@ const PAYOUT_TIER_MAP: Record<string, number> = {
 };
 
 export async function processRoster(opts: {
-  fileId: string;
+  objectKey: string;            // Storj object key (returned by uploadFile)
   program: string;
   region: string;
-  tierGroupIds: Record<number, string>;   // tier number → Enforcer group ID
+  tierGroupIds: Record<number, string>;   // tier number → Enforcer group UUID
   policyId?: string;
   callerAddress?: string;
+  bucketName?: string;          // Storj bucket name (for archive move)
   archivePath?: string;
 }): Promise<ProcessRosterResult> {
   const {
-    fileId,
+    objectKey,
     program,
     region,
     tierGroupIds,
     policyId,
     callerAddress,
+    bucketName = "",
     archivePath = "processed/",
   } = opts;
 
   const result: ProcessRosterResult = {
-    fileId,
+    objectKey,
     program,
     region,
     totalRows: 0,
@@ -173,18 +173,17 @@ export async function processRoster(opts: {
     const res = await authorize(policyId, {
       action: "process_roster",
       program,
-      subject: callerAddress,
+      user_id: callerAddress,
     });
-    const allowed = !!(res.data?.["allowed"] ?? (res as any).allowed);
-    if (!allowed) {
+    if (!res.allow) {
       throw new Error(`Unauthorized: ${callerAddress} cannot process rosters for ${program}`);
     }
     console.log("[authorize] ✓ Admin confirmed");
   }
 
   // Step 2: Fetch CSV via presigned URL
-  console.log(`[fetch] Getting presigned URL for file_id=${fileId}...`);
-  const presignedUrl = await getPresignedUrl(fileId, 600); // 10 min
+  console.log(`[fetch] Getting presigned URL for object_key=${objectKey}...`);
+  const presignedUrl = await getPresignedUrl(objectKey, 600); // 10 min
   console.log("[fetch] ✓ Got presigned URL, downloading...");
 
   const csvRes = await fetch(presignedUrl);
@@ -211,30 +210,11 @@ export async function processRoster(opts: {
   result.ineligibleCount = ineligibleRows.length;
 
   if (eligibleRows.length === 0) {
-    console.log("[process] No eligible rows — skipping onboarding");
+    console.log("[process] No eligible rows — skipping group assignment");
   } else {
-    // Step 4: Batch create profiles
-    console.log(`[profiles] Creating ${eligibleRows.length} profiles...`);
-    const accounts: RawAccount[] = eligibleRows.map((r) => ({
-      account_address: r.address,
-      email:           r.email,
-      first_name:      r.first_name,
-      last_name:       r.last_name,
-      phone_number:    r.phone_or_ref.startsWith("+") ? r.phone_or_ref : undefined,
-    }));
-
-    try {
-      await multiCreateProfiles(accounts);
-      console.log(`[profiles] ✓ Created ${accounts.length} profiles`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[profiles] Error: ${msg}`);
-      result.errors.push(`Profile batch create: ${msg}`);
-    }
-
-    // Step 5: Assign eligible recipients to their tier-specific group
+    // Step 4: Resolve each wallet to UUID and assign to tier group
     if (Object.keys(tierGroupIds).length > 0) {
-      console.log(`[groups] Assigning ${eligibleRows.length} recipients to tier groups...`);
+      console.log(`[groups] Resolving and assigning ${eligibleRows.length} recipients...`);
       let groupedCount = 0;
 
       for (const row of eligibleRows) {
@@ -249,7 +229,13 @@ export async function processRoster(opts: {
           continue;
         }
         try {
-          await addAccountToGroups(row.address, [groupId]);
+          // Resolve wallet address → enforcer-v2 UUID
+          const user = await resolveUser(row.address);
+          if (!user?.id) {
+            result.errors.push(`${row.address}: not registered in enforcer (run onboard-recipient first)`);
+            continue;
+          }
+          await addUserToGroups(user.id, [groupId]);
           groupedCount++;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -260,16 +246,21 @@ export async function processRoster(opts: {
     }
   }
 
-  // Step 6: Archive processed file
-  console.log(`[archive] Moving file to ${archivePath}...`);
-  try {
-    await moveFile(fileId, `${archivePath}${fileId}_${Date.now()}.csv`);
-    result.archived = true;
-    console.log("[archive] ✓ File archived");
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[archive] Warning: ${msg}`);
-    result.errors.push(`Archive: ${msg}`);
+  // Step 5: Archive processed file
+  if (bucketName) {
+    const destKey = `${archivePath}${objectKey.split("/").pop()}_${Date.now()}.csv`;
+    console.log(`[archive] Moving to ${destKey}...`);
+    try {
+      await moveFile(bucketName, objectKey, destKey);
+      result.archived = true;
+      console.log("[archive] ✓ File archived");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[archive] Warning: ${msg}`);
+      result.errors.push(`Archive: ${msg}`);
+    }
+  } else {
+    console.log("[archive] Skipped — no --bucket-name provided");
   }
 
   return result;
@@ -284,17 +275,18 @@ async function main() {
     return i !== -1 ? args[i + 1] : undefined;
   };
 
-  const fileId         = get("--file-id");
-  const program        = get("--program");
-  const region         = get("--region");
+  const objectKey       = get("--object-key");
+  const program         = get("--program");
+  const region          = get("--region");
   const tierGroupIdsRaw = get("--tier-group-ids") ?? "{}";
 
-  if (!fileId || !program || !region) {
+  if (!objectKey || !program || !region) {
     console.error(
       "Usage: ts-node scripts/processRoster.ts \\\n" +
-      "  --file-id <id> --program <name> --region <id> \\\n" +
-      "  --tier-group-ids '{\"1\":\"groupId_standard\",\"2\":\"groupId_priority\"}' \\\n" +
-      "  [--policy-id <id>] [--caller-address <0x...>] [--archive-path processed/]"
+      "  --object-key <storj-key> --program <name> --region <id> \\\n" +
+      "  --tier-group-ids '{\"1\":\"groupUUID_standard\",\"2\":\"groupUUID_priority\"}' \\\n" +
+      "  [--policy-id <id>] [--caller-address <0x...>] \\\n" +
+      "  [--bucket-name <storj-bucket>] [--archive-path processed/]"
     );
     process.exit(1);
   }
@@ -314,12 +306,13 @@ async function main() {
   console.log("=".repeat(55));
 
   const result = await processRoster({
-    fileId,
+    objectKey,
     program,
     region,
     tierGroupIds,
     policyId:      get("--policy-id"),
     callerAddress: get("--caller-address"),
+    bucketName:    get("--bucket-name"),
     archivePath:   get("--archive-path"),
   });
 

@@ -1,21 +1,14 @@
 /**
  * createAttestation.ts — Phase 7: TrustSync Transparency
  *
- * Two attestation flows (from playbook):
+ * Creates TrustSync attestations via the RWA Gateway (rwa-gateway.instruxi.dev).
  *
- *   proofOfFunds(...)
- *     Creates a single attestation for the current treasury USDC balance.
- *     POST /rwa/attestation/create → POST /rwa/attestation/publish
- *     Use after deposit or periodic snapshots so donors can verify reserves.
- *
- *   proofOfDisbursement(...)
- *     Creates individual attestations for each disbursement, then groups
- *     them into an audited batch.
- *     POST /rwa/attestation/create (×N) →
- *     POST /rwa/attestation-batches →
- *     POST /rwa/attestation-batches/{id}/link →
- *     GET  /rwa/attestation-batches/{id}/validate →
- *     GET  /rwa/attestation-batches/{id}/metrics
+ * Prerequisites (obtain from Instruxi dashboard / manager):
+ *   1. INSTRUXI_ADMIN_JWT — Bearer token for rwa-gateway authentication
+ *   2. RWA_GATEWAY_URL   — https://rwa-gateway.instruxi.dev
+ *   3. contract_deployment_id — ID of ReliefTreasury in the RWA gateway contract registry
+ *   4. EIP-712 nonce — GET /api/attestations/nonce before each attestation
+ *   5. EIP-712 signature — signed by the admin wallet over the attestation data + nonce
  *
  * Usage — proof of funds:
  *   npx ts-node scripts/createAttestation.ts proof-of-funds \
@@ -23,30 +16,18 @@
  *     --usdc 0xUSDC \
  *     --balance 50000000000 \
  *     --chain-id 11155111 \
- *     --account 0xAdminAddress
- *
- * Usage — proof of disbursement batch:
- *   npx ts-node scripts/createAttestation.ts proof-of-disbursement \
- *     --treasury 0xReliefTreasury \
- *     --usdc 0xUSDC \
- *     --chain-id 11155111 \
- *     --account 0xAdminAddress \
- *     --auditor 0xAuditorAddress \
- *     --auditor-sig 0x... \
- *     --disbursements '[{"recipient":"0x..","amount":50000000},...]'
+ *     --contract-deployment-id <id> \
+ *     --nonce <uuid> \
+ *     --signature 0x...
  *
  * Required env vars:
- *   INSTRUXI_BASE_URL, INSTRUXI_API_KEY, INSTRUXI_ADMIN_JWT
+ *   RWA_GATEWAY_URL, INSTRUXI_ADMIN_JWT
  */
 
 import "dotenv/config";
 import {
   createAttestation,
   publishAttestation,
-  createAttestationBatch,
-  linkAttestationsToBatch,
-  validateAttestationBatch,
-  getAttestationBatchMetrics,
   type CreateAttestationInput,
 } from "./instruxi";
 
@@ -58,10 +39,13 @@ export interface ProofOfFundsInput {
   usdcAddress: string;            // USDC token contract address
   balanceRaw: number;             // Raw USDC balance (6 decimals, e.g. 50000000000 = $50,000)
   chainId: number;
+  contractDeploymentId: number;   // RWA Gateway contract deployment ID
+  nonce: string;                  // Server nonce from GET /api/attestations/nonce
+  signature: string;              // EIP-712 signature from admin wallet
 }
 
 export interface ProofOfFundsResult {
-  attestationId: string;
+  attestationId: string | number;
   balance: number;
   published: boolean;
 }
@@ -76,17 +60,25 @@ export async function proofOfFunds(
   console.log(`\n[proof-of-funds] Treasury: ${input.treasuryAddress}`);
   console.log(`[proof-of-funds] Balance: ${input.balanceRaw / 1e6} USDC`);
 
+  const attestationData = JSON.stringify({
+    chain_id: input.chainId,
+    contract_address: input.treasuryAddress,
+    nav_contract_address: input.usdcAddress,
+    decimals: 6,
+    amount: String(input.balanceRaw),
+    valid_from: new Date().toISOString(),
+    valid_to: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+  });
+
   const attestationInput: CreateAttestationInput = {
-    account_address:                    input.accountAddress,
-    asset_contract_address:             input.treasuryAddress,
-    fractional_amount:                  input.balanceRaw,
-    fractional_decimals:                6,
-    fractional_token_contract_address:  input.usdcAddress,
-    fractional_unit:                    "USDC",
-    token_id:                           0,
-    chain_id:                           input.chainId,
-    public:                             true,
-    active:                             true,
+    contract_deployment_id: input.contractDeploymentId,
+    attestation_type: "net_asset_value",
+    attestor_name: "Instruxi Relief Treasury",
+    attestor_wallet_address: input.accountAddress,
+    attestation_data: attestationData,
+    nonce: input.nonce,
+    signature: input.signature,
+    active: true,
   };
 
   const createRes = await createAttestation(attestationInput);
@@ -115,22 +107,20 @@ export interface ProofOfDisbursementInput {
   usdcAddress: string;
   chainId: number;
   disbursements: DisbursementRecord[];
-  auditorAddress: string;
-  auditorSignature: string;        // Auditor's ECDSA signature over the batch
+  contractDeploymentId: number;
+  nonce: string;
+  signature: string;
 }
 
 export interface ProofOfDisbursementResult {
-  batchId: string;
-  attestationIds: string[];
+  attestationIds: (string | number)[];
   totalAmount: number;
-  valid: boolean;
-  metrics: Record<string, unknown>;
 }
 
 /**
- * Create individual disbursement attestations, group into a batch,
- * link them, validate totals, and return metrics.
- * Called after a disbursement event is closed or on a schedule.
+ * Create proof-of-disbursement attestations (one per disbursement).
+ * Note: batch grouping is handled within the RWA Gateway; individual
+ * attestations are created here with proof_of_reserve type.
  */
 export async function proofOfDisbursement(
   input: ProofOfDisbursementInput
@@ -139,62 +129,41 @@ export async function proofOfDisbursement(
   console.log(`\n[proof-of-disbursement] Creating ${disbursements.length} attestations...`);
 
   const totalAmount = disbursements.reduce((sum, d) => sum + d.amount, 0);
-  const attestationIds: string[] = [];
+  const attestationIds: (string | number)[] = [];
 
-  // Step 1: Individual attestation per disbursement
   for (const d of disbursements) {
-    const res = await createAttestation({
-      account_address:                    input.accountAddress,
-      asset_contract_address:             input.treasuryAddress,
-      fractional_amount:                  d.amount,
-      fractional_decimals:                6,
-      fractional_token_contract_address:  input.usdcAddress,
-      fractional_unit:                    "USDC",
-      token_id:                           0,
-      chain_id:                           input.chainId,
-      active:                             true,
-      public:                             false,  // batch publish below
+    const attestationData = JSON.stringify({
+      chain_id: input.chainId,
+      contract_address: input.treasuryAddress,
+      por_contract_address: input.usdcAddress,
+      decimals: 6,
+      amount: String(d.amount),
+      recipient: d.recipient,
+      tx_hash: d.txHash,
+      event_id: d.eventId,
+      valid_from: new Date().toISOString(),
+      valid_to: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
     });
+
+    const res = await createAttestation({
+      contract_deployment_id: input.contractDeploymentId,
+      attestation_type: "proof_of_reserve",
+      attestor_name: "Instruxi Relief Treasury",
+      attestor_wallet_address: input.accountAddress,
+      attestation_data: attestationData,
+      nonce: input.nonce,
+      signature: input.signature,
+      active: true,
+    });
+
     const id = res.data?.id ?? "";
     if (!id) throw new Error(`createAttestation returned no id for recipient ${d.recipient}`);
     attestationIds.push(id);
     console.log(`  ✓ ${d.recipient} → $${d.amount / 1e6} USDC (attestation ${id})`);
   }
 
-  // Step 2: Create attestation batch
-  console.log(`\n[proof-of-disbursement] Creating batch (total: $${totalAmount / 1e6} USDC)...`);
-  const batchRes = await createAttestationBatch({
-    asset_contract_address:             input.treasuryAddress,
-    fractional_token_contract_address:  input.usdcAddress,
-    total_amount:                       totalAmount,
-    audit_timestamp:                    new Date().toISOString(),
-    auditor_account_address:            input.auditorAddress,
-    auditor_signature:                  input.auditorSignature,
-    chain_id:                           input.chainId,
-    active:                             true,
-  });
-  const batchId = batchRes.data?.id ?? "";
-  if (!batchId) throw new Error("createAttestationBatch returned no id");
-  console.log(`[proof-of-disbursement] ✓ Batch created id=${batchId}`);
-
-  // Step 3: Link attestations to batch
-  await linkAttestationsToBatch(batchId);
-  console.log(`[proof-of-disbursement] ✓ Linked ${attestationIds.length} attestations to batch`);
-
-  // Step 4: Validate totals
-  const validateRes = await validateAttestationBatch(batchId);
-  const valid = validateRes.data?.valid ?? false;
-  console.log(`[proof-of-disbursement] ✓ Validation: ${valid ? "PASSED" : "FAILED"}`);
-  if (!valid) {
-    console.warn("[proof-of-disbursement] Warning: batch validation failed — totals may not match");
-  }
-
-  // Step 5: Fetch metrics for dashboard
-  const metricsRes = await getAttestationBatchMetrics(batchId);
-  const metrics = (metricsRes.data ?? {}) as Record<string, unknown>;
-  console.log(`[proof-of-disbursement] Metrics:`, JSON.stringify(metrics, null, 2));
-
-  return { batchId, attestationIds, totalAmount, valid, metrics };
+  console.log(`[proof-of-disbursement] ✓ ${attestationIds.length} attestations created`);
+  return { attestationIds, totalAmount };
 }
 
 // ── CLI entry point ───────────────────────────────────────────────────────
@@ -208,44 +177,53 @@ async function main() {
   };
 
   if (command === "proof-of-funds") {
-    const treasury = get("--treasury");
-    const usdc     = get("--usdc");
-    const balance  = get("--balance");
-    const chainId  = get("--chain-id");
-    const account  = get("--account");
+    const treasury    = get("--treasury");
+    const usdc        = get("--usdc");
+    const balance     = get("--balance");
+    const chainId     = get("--chain-id");
+    const account     = get("--account");
+    const deployId    = get("--contract-deployment-id");
+    const nonce       = get("--nonce");
+    const signature   = get("--signature");
 
-    if (!treasury || !usdc || !balance || !chainId || !account) {
+    if (!treasury || !usdc || !balance || !chainId || !account || !deployId || !nonce || !signature) {
       console.error(
         "Usage: ts-node scripts/createAttestation.ts proof-of-funds \\\n" +
         "  --treasury <0x...> --usdc <0x...> --balance <raw> \\\n" +
-        "  --chain-id <int> --account <0x...>"
+        "  --chain-id <int> --account <0x...> \\\n" +
+        "  --contract-deployment-id <int> --nonce <uuid> --signature <0x...>"
       );
       process.exit(1);
     }
 
     const result = await proofOfFunds({
-      accountAddress:  account,
-      treasuryAddress: treasury,
-      usdcAddress:     usdc,
-      balanceRaw:      Number(balance),
-      chainId:         Number(chainId),
+      accountAddress:        account,
+      treasuryAddress:       treasury,
+      usdcAddress:           usdc,
+      balanceRaw:            Number(balance),
+      chainId:               Number(chainId),
+      contractDeploymentId:  Number(deployId),
+      nonce,
+      signature,
     });
     console.log("\nResult:", JSON.stringify(result, null, 2));
 
   } else if (command === "proof-of-disbursement") {
-    const treasury      = get("--treasury");
-    const usdc          = get("--usdc");
-    const chainId       = get("--chain-id");
-    const account       = get("--account");
-    const auditor       = get("--auditor");
-    const auditorSig    = get("--auditor-sig");
+    const treasury         = get("--treasury");
+    const usdc             = get("--usdc");
+    const chainId          = get("--chain-id");
+    const account          = get("--account");
+    const deployId         = get("--contract-deployment-id");
+    const nonce            = get("--nonce");
+    const signature        = get("--signature");
     const disbursementsRaw = get("--disbursements");
 
-    if (!treasury || !usdc || !chainId || !account || !auditor || !auditorSig || !disbursementsRaw) {
+    if (!treasury || !usdc || !chainId || !account || !deployId || !nonce || !signature || !disbursementsRaw) {
       console.error(
         "Usage: ts-node scripts/createAttestation.ts proof-of-disbursement \\\n" +
         "  --treasury <0x...> --usdc <0x...> --chain-id <int> \\\n" +
-        "  --account <0x...> --auditor <0x...> --auditor-sig <0x...> \\\n" +
+        "  --account <0x...> --contract-deployment-id <int> \\\n" +
+        "  --nonce <uuid> --signature <0x...> \\\n" +
         "  --disbursements '[{\"recipient\":\"0x..\",\"amount\":50000000,\"txHash\":\"0x..\",\"eventId\":\"0x..\"}]'"
       );
       process.exit(1);
@@ -254,13 +232,14 @@ async function main() {
     const disbursements: DisbursementRecord[] = JSON.parse(disbursementsRaw);
 
     const result = await proofOfDisbursement({
-      accountAddress:  account,
-      treasuryAddress: treasury,
-      usdcAddress:     usdc,
-      chainId:         Number(chainId),
+      accountAddress:       account,
+      treasuryAddress:      treasury,
+      usdcAddress:          usdc,
+      chainId:              Number(chainId),
       disbursements,
-      auditorAddress:  auditor,
-      auditorSignature: auditorSig,
+      contractDeploymentId: Number(deployId),
+      nonce,
+      signature,
     });
     console.log("\nResult:", JSON.stringify(result, null, 2));
 

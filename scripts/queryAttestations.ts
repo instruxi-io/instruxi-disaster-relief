@@ -38,7 +38,7 @@ interface ApiResponse<T> {
 
 function cfg() {
   return {
-    baseUrl:  process.env.INSTRUXI_BASE_URL  || "https://gateway-staging.instruxi.dev/api/v1",
+    baseUrl:  process.env.RWA_GATEWAY_URL    || "https://rwa-gateway.instruxi.dev",
     apiKey:   process.env.INSTRUXI_API_KEY   || "",
     adminJwt: process.env.INSTRUXI_ADMIN_JWT || "",
   };
@@ -74,7 +74,7 @@ async function queryAttestations(treasuryAddress: string): Promise<void> {
   try {
     // Try the list endpoint filtered by asset_contract_address
     const res = await get<ApiResponse<AttestationRecord[]>>(
-      `/rwa/attestation/list?asset_contract_address=${encodeURIComponent(treasuryAddress)}`
+      `/api/attestations/public/list?contract_address=${encodeURIComponent(treasuryAddress)}`
     );
     attestations = res.data ?? [];
   } catch (err) {
@@ -84,7 +84,7 @@ async function queryAttestations(treasuryAddress: string): Promise<void> {
       "\nNote: list endpoint unavailable or not yet populated.",
       "\nTo query a specific attestation by ID, run:",
       `\n  curl -H "x-api-key: $INSTRUXI_API_KEY" \\`,
-      `\n       ${cfg().baseUrl}/rwa/attestation/<ID>\n`
+      `\n       ${cfg().baseUrl}/api/attestations/public/<ID>\n`
     );
     if (err instanceof Error) {
       console.log(`Detail: ${err.message}`);

@@ -473,9 +473,9 @@ RWA_GATEWAY_JWT: "<your-gateway-jwt>"
   "chainSelectorName": "ethereum-testnet-sepolia",
   "gasLimit": "500000",
   "instruxi": {
-    "baseUrl": "https://gateway-staging.instruxi.dev/api/v1",
+    "baseUrl": "https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer",
     "eligibilityGroupPrefix": "Eligible:",
-    "rwGatewayUrl": "https://rwa-gateway-staging.instruxi.dev",
+    "rwGatewayUrl": "https://rwa-gateway.instruxi.dev",
     "policyId": "<YOUR_INSTRUXI_POLICY_ID>"
   }
 }
@@ -491,6 +491,47 @@ cre workflow simulate disaster-relief-workflow \
   --evm-event-index 0 \
   --target staging-settings
 ```
+
+---
+
+## Frontend (Recipient UI)
+
+A React + Privy app lives in `frontend/`. Recipients login with email or Google, receive a Privy-managed embedded wallet, and claim their disbursement — all in one flow.
+
+### Run locally
+
+```bash
+cd frontend
+cp .env.example .env          # fill in VITE_TREASURY_ADDRESS after deploy
+npm install
+npm run dev                   # http://localhost:3000
+```
+
+Or from the project root:
+
+```bash
+npm run frontend
+```
+
+### What it does
+
+| Step | Action |
+|------|--------|
+| 1 | Recipient signs in via Privy (email OTP, Google, or wallet) |
+| 2 | Privy creates an embedded wallet automatically if they don't have one |
+| 3 | Wallet address is registered with Instruxi Enforcer |
+| 4 | Recipient enters the event ID and checks eligibility (onchain read) |
+| 5 | If eligible, they click **Claim** — `claimDisbursement(eventId)` is called |
+| 6 | Funds arrive in their Privy wallet; tx hash links to Etherscan |
+
+### Environment
+
+| Variable | Description |
+|----------|-------------|
+| `VITE_PRIVY_APP_ID` | Privy app ID (from rwa-gateway `/health`) |
+| `VITE_ENFORCER_URL` | Instruxi Enforcer base URL |
+| `VITE_TREASURY_ADDRESS` | Deployed `ReliefTreasury` contract address |
+| `VITE_DEFAULT_EVENT_ID` | Pre-fill event ID for demo (optional) |
 
 ---
 
@@ -577,13 +618,13 @@ USDC_ADDRESS=
 PROGRAM_CAP=1000000000000        # $1,000,000 USDC
 
 # Instruxi API (scripts/)
-INSTRUXI_BASE_URL=https://gateway-staging.instruxi.dev/api/v1
+INSTRUXI_BASE_URL=https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer
 INSTRUXI_API_KEY=
 INSTRUXI_ADMIN_JWT=
 INSTRUXI_TENANT_ID=
 
 # RWA Gateway (scripts/ + workflow/)
-RWA_GATEWAY_URL=https://rwa-gateway-staging.instruxi.dev
+RWA_GATEWAY_URL=https://rwa-gateway.instruxi.dev
 RWA_GATEWAY_JWT=
 ```
 
