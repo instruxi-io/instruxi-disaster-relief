@@ -12,8 +12,8 @@
  *   - Attestations: create, publish
  *   - CRE webhook: notify
  *
- * Auth: Authorization: Bearer <adminJwt> on all requests.
- *       x-api-key accepted as alternative on some endpoints.
+ * Auth: x-api-key is sufficient for all endpoints (including Admin-gated ones).
+ *       INSTRUXI_ADMIN_JWT is sent when present but not required.
  *
  * IMPORTANT — User IDs in enforcer-v2:
  *   Group operations use UUID user IDs, not wallet addresses.
@@ -35,7 +35,7 @@ export interface InstruxiConfig {
 function cfg(): InstruxiConfig {
   return {
     baseUrl:      process.env.INSTRUXI_BASE_URL  || "https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer",
-    rwGatewayUrl: process.env.RWA_GATEWAY_URL    || "https://rwa-gateway.instruxi.dev",
+    rwGatewayUrl: process.env.RWA_GATEWAY_URL    || "https://rwa-gateway-staging.instruxi.dev",
     apiKey:       process.env.INSTRUXI_API_KEY   || "",
     adminJwt:     process.env.INSTRUXI_ADMIN_JWT || "",
     tenantId:     process.env.INSTRUXI_TENANT_ID || "",
@@ -53,7 +53,7 @@ async function req<T>(
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "x-api-key": c.apiKey,
-    "Authorization": `Bearer ${c.adminJwt}`,
+    ...(c.adminJwt ? { "Authorization": `Bearer ${c.adminJwt}` } : {}),
     ...extraHeaders,
   };
 
@@ -122,11 +122,13 @@ export interface UserRecord {
 }
 
 export interface WalletRecord {
-  id: string;
-  address: string;
+  wallet_id: string;
+  user_id: string;
   chain_id: number;
   name?: string;
   provider?: string;
+  master_key_id?: string;  // e.g. "privy_did:privy:{DID}_0" — use to resolve address via Privy
+  status?: string;
   created_at?: string;
 }
 
@@ -238,6 +240,89 @@ export async function createUserWallet(
     name,
     provider: "privy",
   });
+}
+
+/**
+ * Create a Privy user + server wallet in one call via the RWA Gateway.
+ * POST /api/privy/server-wallet/create-user
+ *
+ * Returns the wallet address directly — no separate wallet provisioning step needed.
+ * This is the preferred path for batch roster ingestion since POST /admin/users
+ * has a known issue where it errors on identity_provider_error for all email domains.
+ *
+ * @param email   Recipient email address
+ * @returns       { privyDid, walletAddress } or throws on failure
+ */
+export async function createPrivyUser(email: string): Promise<{ privyDid: string; walletAddress: string }> {
+  const c = cfg();
+  const url = `${c.rwGatewayUrl}/api/privy/server-wallet/create-user`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${c.adminJwt}`,
+    },
+    body: JSON.stringify({
+      linked_accounts: [{ type: "email", address: email, chain_type: "ethereum" }],
+    }),
+  });
+
+  const json = await res.json() as {
+    success: boolean;
+    data?: {
+      id: string;
+      linked_accounts: Array<{ type: string; address: string }>;
+    };
+    message?: string;
+  };
+
+  if (!res.ok || !json.success) {
+    throw new Error(`createPrivyUser → ${res.status}: ${json.message ?? JSON.stringify(json)}`);
+  }
+
+  const privyDid = json.data!.id;
+  const walletAccount = json.data!.linked_accounts.find(
+    a => a.type === "wallet" && a.address && a.address !== "0x0000000000000000000000000000000000000000"
+  );
+  if (!walletAccount) throw new Error(`createPrivyUser: no wallet in response for ${email}`);
+
+  return { privyDid, walletAddress: walletAccount.address };
+}
+
+/**
+ * Get a provisioned wallet's real blockchain address via the RWA Gateway Privy API.
+ * After POST /users/{id}/wallets, the address lives in Privy — not the enforcer wallet record.
+ *
+ * Extracts the Privy DID from master_key_id ("privy_did:privy:{DID}_0"),
+ * fetches GET /api/privy/users from the Gateway, and returns the first non-zero wallet address.
+ *
+ * @param masterKeyId  The master_key_id field from the WalletRecord response
+ */
+export async function getPrivyWalletAddress(masterKeyId: string): Promise<string | null> {
+  // master_key_id format: "privy_did:privy:{DID}_0"
+  const match = masterKeyId.match(/privy_did:privy:([^_]+)/);
+  if (!match) return null;
+  const privyDid = `did:privy:${match[1]}`;
+
+  const c = cfg();
+  const url = `${c.rwGatewayUrl}/api/privy/users?limit=100`;
+  const res = await fetch(url, {
+    headers: {
+      "Authorization": `Bearer ${c.adminJwt}`,
+    },
+  });
+
+  if (!res.ok) return null;
+
+  const json = await res.json() as { data?: { data?: Array<{ id: string; linked_accounts: Array<{ type: string; address: string }> }> } };
+  const users = json.data?.data ?? [];
+  const user = users.find(u => u.id === privyDid);
+  if (!user) return null;
+
+  const wallet = user.linked_accounts.find(
+    a => a.type === "wallet" && a.address && a.address !== "0x0000000000000000000000000000000000000000"
+  );
+  return wallet?.address ?? null;
 }
 
 /**

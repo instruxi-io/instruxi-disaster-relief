@@ -1,5 +1,5 @@
 {
-  "reliefTreasuryAddress": "0x0000000000000000000000000000000000000000",
+  "reliefTreasuryAddress": "0x5e588C93FAcb105fCf8b391D534D61064236EbC7",
   "chainSelectorName": "ethereum-testnet-sepolia",
   "gasLimit": "500000",
   "usdcAddress": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
@@ -7,7 +7,7 @@
   "instruxi": {
     "baseUrl": "https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer",
     "eligibilityGroupPrefix": "Eligible:",
-    "rwGatewayUrl": "https://rwa-gateway.instruxi.dev",
+    "rwGatewayUrl": "https://rwa-gateway-staging.instruxi.dev",
     "policyId": ""
   }
 }

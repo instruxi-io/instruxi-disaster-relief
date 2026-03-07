@@ -41,7 +41,7 @@ const config: HardhatUserConfig = {
       chainId: 11155111,
       url: `https://eth-sepolia.g.alchemy.com/v2/${providerApiKey}`,
       accounts: [deployerPrivateKey],
-      gasPrice: 100000000000,
+      gasPrice: "auto",
       timeout: 600000,
     },
     arbitrumSepolia: {

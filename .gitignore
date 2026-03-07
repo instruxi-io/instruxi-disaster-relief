@@ -11,3 +11,13 @@ secrets.yaml
 workflow/node_modules/
 workflow/.env
 workflow/dist/
+project.yaml
+
+workflow/.cre_build_tmp.js
+workflow/tmp.js
+workflow/tmp.wasm
+
+scripts/_inspect_swagger.js
+scripts/_test_wallet.js
+
+frontend/tsconfig.tsbuildinfo

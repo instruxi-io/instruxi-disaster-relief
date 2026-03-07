@@ -119,7 +119,7 @@ task("deposit-usdc", "Deposit USDC into ReliefTreasury")
   .addParam("amount", "Amount in 6-decimal units (e.g. 1000000000 = $1000)")
   .setAction(async ({ contract, usdc, amount }, hre) => {
     const [signer] = await hre.ethers.getSigners();
-    const token = await hre.ethers.getContractAt("MockUSDC", usdc, signer);
+    const token = await hre.ethers.getContractAt("IERC20", usdc, signer);
     const relief = await hre.ethers.getContractAt("ReliefTreasury", contract, signer);
 
     console.log(`Approving ${Number(amount) / 1e6} USDC for deposit...`);

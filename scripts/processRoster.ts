@@ -41,9 +41,7 @@ import "dotenv/config";
 import { createHash } from "crypto";
 import {
   getPresignedUrl,
-  adminCreateUser,
-  createUserWallet,
-  addUserToGroups,
+  createPrivyUser,
   moveFile,
 } from "./instruxi";
 
@@ -204,26 +202,11 @@ export async function processRoster(opts: {
       }
 
       try {
-        // 3a. Create enforcer user from email
-        console.log(`  [user] Creating user for ${row.email}...`);
-        const userRes = await adminCreateUser(row.email, {
-          first_name: row.first_name,
-          last_name:  row.last_name,
-        });
-        const userId = userRes.data?.id;
-        if (!userId) throw new Error(`No user ID returned for ${row.email}`);
-        console.log(`  [user] ✓ user_id: ${userId}`);
-
-        // 3b. Provision wallet via enforcer/Privy
-        console.log(`  [wallet] Provisioning wallet for ${userId}...`);
-        const walletRes = await createUserWallet(userId, chainId);
-        const walletAddress = walletRes.data?.address;
-        if (!walletAddress) throw new Error(`No wallet address returned for ${row.email}`);
-        console.log(`  [wallet] ✓ address: ${walletAddress}`);
-
-        // 3c. Assign to tier group
-        await addUserToGroups(userId, [groupId]);
-        console.log(`  [group] ✓ Added to tier ${tier} group`);
+        // Create Privy user + server wallet via RWA Gateway in one call.
+        // Returns wallet address directly — no enforcer user creation needed.
+        console.log(`  [privy] Creating user + wallet for ${row.email}...`);
+        const { privyDid, walletAddress } = await createPrivyUser(row.email);
+        console.log(`  [privy] ✓ did: ${privyDid}  address: ${walletAddress}`);
 
         // Collect for eligibility registration
         result.wallets.push(walletAddress);
