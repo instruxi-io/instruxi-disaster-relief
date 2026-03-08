@@ -74,18 +74,13 @@ task("request-verification", "Request CRE event verification")
   });
 
 // ================================================================
-//  activate-event
+//  NOTE: There is no activate-event task.
+//
+//  Events auto-activate inside onReport() when CRE Pipeline 1
+//  returns verified=true. The contract emits EventVerified and
+//  EventActivated in the same transaction. There is no manual
+//  activateEvent() function and no separate Verified→Active step.
 // ================================================================
-task("activate-event", "Activate a verified event to enable disbursements")
-  .addParam("contract", "ReliefTreasury address")
-  .addParam("eventid", "Event ID (hex bytes32)")
-  .setAction(async ({ contract, eventid }, hre) => {
-    const [signer] = await hre.ethers.getSigners();
-    const relief = await hre.ethers.getContractAt("ReliefTreasury", contract, signer);
-    const tx = await (relief as any).activateEvent(eventid);
-    const receipt = await tx.wait();
-    console.log(`✅ Event ${eventid} activated. Tx: ${receipt.hash}`);
-  });
 
 // ================================================================
 //  anchor-roster

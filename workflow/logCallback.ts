@@ -186,7 +186,7 @@ function checkGDACS(runtime: Runtime<WorkflowConfig>, ref: ExternalRef): boolean
 }
 
 /** Source 3: NASA EONET (Earth Observatory Natural Event Tracker) — free, no key required */
-function checkReliefWeb(runtime: Runtime<WorkflowConfig>, ref: ExternalRef): boolean {
+function checkEONET(runtime: Runtime<WorkflowConfig>, ref: ExternalRef): boolean {
   // Query open natural events; optionally filter by category (floods=9, severe storms=10, wildfires=8)
   const categoryQ = ref.region ? "" : ""; // EONET doesn't filter by country — global open events confirm ongoing disasters
   const url = `https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=5${categoryQ}`;
@@ -208,10 +208,10 @@ function checkReliefWeb(runtime: Runtime<WorkflowConfig>, ref: ExternalRef): boo
 /** 2-of-3 consensus: at least 2 sources must confirm */
 function applyConsensus(
   runtime: Runtime<WorkflowConfig>,
-  s: { usgs: boolean; gdacs: boolean; reliefweb: boolean }
+  s: { usgs: boolean; gdacs: boolean; eonet: boolean }
 ): boolean {
-  const votes = [s.usgs, s.gdacs, s.reliefweb].filter(Boolean).length;
-  runtime.log(`[Consensus] USGS=${s.usgs} GDACS=${s.gdacs} ReliefWeb=${s.reliefweb} → ${votes}/3`);
+  const votes = [s.usgs, s.gdacs, s.eonet].filter(Boolean).length;
+  runtime.log(`[Consensus] USGS=${s.usgs} GDACS=${s.gdacs} EONET=${s.eonet} → ${votes}/3`);
   return votes >= 2;
 }
 
@@ -368,8 +368,8 @@ function handleEventVerification(
   runtime.log("── Querying External Data Sources ──────────────────────");
   const usgs      = checkUSGS(runtime, externalRef);
   const gdacs     = checkGDACS(runtime, externalRef);
-  const reliefweb = checkReliefWeb(runtime, externalRef);
-  const verified  = applyConsensus(runtime, { usgs, gdacs, reliefweb });
+  const eonet    = checkEONET(runtime, externalRef);
+  const verified = applyConsensus(runtime, { usgs, gdacs, eonet });
 
   runtime.log(`[Result] verified=${verified}`);
   const report  = encodeEventVerificationReport(requestId, verified);

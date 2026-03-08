@@ -16,7 +16,7 @@ Disaster relief is plagued by three interlinked problems: funds diverted before 
 This platform is designed for adoption by NGOs, UN agencies, and government aid programs that want to commit to transparency. The key properties:
 
 - **Disaster verification is not admin-controlled.** CRE queries real live data (GDACS global disaster alerts, NASA EONET, USGS earthquake catalog) and 2-of-3 APIs must confirm the event before the contract transitions to Active. No admin can open disbursements for a fake event.
-- **Eligibility is not admin-controlled.** The Chainlink DON runs OPA policy validation on each recipient wallet and writes eligibility onchain. The admin cannot directly approve a recipient or bypass OPA.
+- **Eligibility is not admin-controlled — when `policyId` is set.** The Chainlink DON runs OPA policy validation on each recipient wallet and writes eligibility onchain. The admin cannot directly approve a recipient or bypass OPA. **Warning:** if `policyId` is left empty in `workflow/config.staging.json`, CRE skips OPA validation and approves all candidates submitted by the admin. This is the default for staging; set a real policy ID for production.
 - **Every financial movement is cryptographically attested.** Deposits and disbursements automatically produce TrustSync attestations. Auditors can query the public attestation record without needing admin access.
 - **The roster is anchored, not stored.** The SHA-256 of the recipient CSV is committed onchain at processing time. Anyone can hash the original file and verify it was not tampered with after the fact.
 
@@ -170,6 +170,60 @@ The OPA policy check runs inside the Chainlink DON as part of the CRE `eligibili
 
 Because eligibility is written onchain by CRE before any recipient claims, `claimDisbursement` is a simple synchronous check-and-transfer. No async CRE request/callback cycle at claim time. No poison-pill reverts, no pending request spam, no permanent denial from transient API errors at claim time.
 
+### OPA `policyId` — Staging vs Production
+
+`workflow/config.staging.json` has a `policyId` field in the `instruxi` object. When this is empty, Pipeline 2 skips OPA and approves all candidate wallets submitted by the admin. This is intentional for staging (you may not have a real Rego policy written yet). For production, populate `policyId` with your configured Instruxi OPA policy ID — only then does CRE enforce policy-gated eligibility.
+
+> **Security:** Deploying to production with an empty `policyId` means eligibility is entirely admin-controlled. Set a real policy ID before going live.
+
+### Workflow ID Pinning (Optional Production Hardening)
+
+The contract has a `setExpectedWorkflowId(bytes32)` function (admin-only). When set to a non-zero value, `onReport()` reads the first 32 bytes of the CRE `metadata` parameter and verifies they match the expected workflow ID. This rejects any `onReport` call that didn't originate from your specific CRE workflow. Disabled by default (`bytes32(0)`). To enable, call it after you have a stable deployed workflow ID from the CRE CLI.
+
+### `injectEligibility.ts` — Admin Testing Bypass
+
+`scripts/injectEligibility.ts` is an admin helper for testing the claim flow without running the full CRE simulation. It:
+1. Calls `requestEligibilityRegistration(eventId, [recipient], [tier])` to get a `requestId`
+2. Temporarily grants the deployer the fulfiller role via `setFulfillerAuthorization`
+3. Encodes and calls `onReport` directly with a `0x02` prefix eligibility payload
+4. Revokes fulfiller authorization
+
+This bypasses CRE Pipelines 1 and 2 entirely. Use it to make a test wallet (e.g. MetaMask) eligible without waiting for CRE simulation. **Never use in production.** Production eligibility must come from the CRE DON via `authorizedFulfillers[chainlinkForwarder]`.
+
+```bash
+npx ts-node --project tsconfig.json scripts/injectEligibility.ts \
+  --event-id 0x<EVENT_ID_BYTES32> \
+  --recipient 0x<WALLET_ADDRESS> \
+  --tier 1
+```
+
+### Event ID Encoding
+
+The `register-event` Hardhat task and the `requestEventVerification` task both accept a human-readable string (e.g. `"MMR-EQ-2025-M77"`) and hash it with `keccak256(toUtf8Bytes(str))` to produce a `bytes32`. The frontend does the same. Always pass the raw string consistently — if you paste a raw `0x` bytes32 anywhere, ensure it came from the same keccak256 hash (not a raw UTF-8 encoding).
+
+### CRE WASM Runtime Constraints
+
+The CRE workflow runs inside a Javy WASM sandbox. Browser/Node.js globals are not available:
+- **`btoa` is not available.** `logCallback.ts` includes a `toBase64()` helper that uses `TextEncoder` + `hexToBase64` from the CRE SDK instead. If you add new HTTP calls that need base64 encoding, use `toBase64()`.
+- **`fetch` is not available.** Use `cre.capabilities.HTTPClient.sendRequest()`.
+- **`setTimeout`/`setInterval` are not available.** All I/O must be synchronous.
+
+### Attestation Nonce Format
+
+Pipelines 3 and 4 encode the recipient/depositor address inside the EIP-712 attestation nonce:
+- Pipeline 3 (disbursement): `cre-disbursement-0x{address}-{timestamp}`
+- Pipeline 4 (deposit): `cre-deposit-0x{address}-{timestamp}`
+
+`scripts/queryAttestations.ts` extracts the account by regex-matching `/(0x[0-9a-fA-F]{40})/` on the nonce. If you change the nonce format in `logCallback.ts`, update `queryAttestations.ts` to match.
+
+### Instruxi API — User IDs vs Wallet Addresses
+
+The Instruxi Enforcer API uses two distinct identifier types. **They are not interchangeable:**
+- **Wallet address** (`0x...`): used for registration (`POST /auth/register`) and OPA checks
+- **UUID user ID**: returned from registration, required for group operations (`POST /admin/groups/{gid}/users/{uid}`)
+
+To get the UUID for a wallet address: `GET /admin/users/resolve?account_address=0x...`. All group-assignment operations in `processRoster.ts` and `setupGroups.ts` go through this resolution step.
+
 ---
 
 ## Participants
@@ -304,7 +358,8 @@ instruxi-disaster-relief/
 │   ├── uploadRoster.ts             # Upload CSV to Instruxi Object Storage
 │   ├── processRoster.ts            # Ingest roster → provision wallets → archive
 │   ├── createAttestation.ts        # Manual attestation (auditor-signed batch)
-│   └── queryAttestations.ts        # Query public TrustSync attestations
+│   ├── queryAttestations.ts        # Query public TrustSync attestations
+│   └── injectEligibility.ts        # Admin bypass — write eligibility onchain without CRE (testing only)
 │
 ├── deploy/
 │   ├── 000_deploy_mocks.ts         # MockUSDC (localhost only)
@@ -322,7 +377,7 @@ instruxi-disaster-relief/
 ├── project.yaml                    # CRE CLI project settings (RPC endpoints)
 ├── secrets.yaml                    # CRE secrets mapping (never commit — see .gitignore)
 ├── .env.example
-└── RUNBOOK.md                      # Step-by-step setup and execution guide
+└── DEPLOYMENT.md                   # Step-by-step setup and execution guide
 ```
 
 ---
@@ -352,9 +407,29 @@ npx hardhat test              # 39 tests
 npx hardhat deploy --network sepolia
 ```
 
+> **Hardhat auto-loads `.env`:** `hardhat.config.ts` uses `import "dotenv/config"`, so all tasks read `.env` automatically. No need to prefix commands with env vars.
+
+### Hardhat Tasks
+
+| Task | Description |
+|------|-------------|
+| `register-event` | Register a disaster event and lock per-tier payout amounts. Accepts event name string (hashed to `bytes32` with `keccak256`) or raw `0x` bytes32. |
+| `request-verification` | Emit `RequestSent(event_verification)` — triggers CRE Pipeline 1. |
+| `request-eligibility` | Submit candidate batch — emits `RequestSent(eligibility_registration)` to trigger CRE Pipeline 2. |
+| `claim-disbursement` | Claim from deployer wallet (or any wallet whose private key is in `DEPLOYER_PRIVATE_KEY`). Checks eligibility before attempting. |
+| `anchor-roster` | Anchor SHA-256 of the recipient CSV onchain. Anyone can re-hash the file and verify integrity. |
+| `deposit-usdc` | Approve + deposit USDC into the treasury. |
+| `treasury-status` | Print treasury balances and optional per-event status. |
+
+> **There is no `activate-event` task.** Events transition from `Pending` to `Active` automatically inside `onReport()` when CRE Pipeline 1 returns `verified=true`. Both `EventVerified` and `EventActivated` are emitted in the same transaction. There is no manual activation step.
+
 ---
 
 ## Environment Variables
+
+> **JWT expiry:** `INSTRUXI_ADMIN_JWT` and `RWA_GATEWAY_JWT` are Privy session tokens that **expire after 1 hour**. Any time a script returns a `401`, refresh the token: open your Privy-connected app in a browser, open DevTools → Application → Local Storage, copy the `privy:token` value, and update both JWT vars in `.env`. Scripts that run longer than 1 hour (large rosters) will need a fresh token mid-run.
+
+> **`CRE_ETH_PRIVATE_KEY` requires the `0x` prefix.** The CRE CLI validates key format strictly. Copy `DEPLOYER_PRIVATE_KEY` exactly including the `0x` prefix.
 
 ```bash
 # Deployment

@@ -176,7 +176,7 @@ RELIEF_TREASURY_ADDRESS=0x<CONTRACT_ADDRESS>
 }
 ```
 
-Leave `policyId` empty unless you have a configured Instruxi OPA policy. When empty, all candidates submitted by the admin are approved by CRE (eligibility gate is admin-controlled only).
+Leave `policyId` empty unless you have a configured Instruxi OPA policy. **When empty, all candidates submitted by the admin are approved by CRE — OPA validation is skipped entirely, and eligibility is effectively admin-controlled.** This is acceptable for staging. For production, populate `policyId` with your Instruxi OPA policy ID before going live.
 
 ### Register the contract in the RWA Gateway
 
@@ -298,7 +298,7 @@ This event is confirmed in the GDACS red-alert database and will return a match 
 
 ## Step 8 — Register the Event Onchain
 
-Compute the event ID. Use any unique human-readable string — it gets hashed to `bytes32`:
+Compute the event ID. Use any unique human-readable string — it gets hashed to `bytes32` via `keccak256`. The hardhat tasks, scripts, and frontend all use the same keccak256 hash, so you can pass the human-readable string anywhere and it will resolve to the same onchain ID.
 
 ```bash
 # With Node:

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { usePrivy, useWallets, useSendTransaction } from '@privy-io/react-auth'
-import { JsonRpcProvider, Contract, Interface } from 'ethers'
+import { JsonRpcProvider, Contract, Interface, keccak256, toUtf8Bytes } from 'ethers'
 import styles from './App.module.css'
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -89,7 +89,8 @@ export default function App() {
     try {
       const provider = new JsonRpcProvider(SEPOLIA_RPC)
       const contract = new Contract(TREASURY_ADDRESS, TREASURY_ABI, provider)
-      const eventIdBytes = eventId.startsWith('0x') ? eventId : `0x${Buffer.from(eventId).toString('hex').padEnd(64, '0')}`
+      // keccak256 matches how hardhat tasks hash the event ID on registration
+      const eventIdBytes = eventId.startsWith('0x') ? eventId : keccak256(toUtf8Bytes(eventId))
       const tier: bigint = await contract.getEligibilityTier(eventIdBytes, walletAddress)
       const claimed: boolean = await contract.hasClaimed(eventIdBytes, walletAddress)
       setRecipientStatus({ eligible: Number(tier), disbursed: claimed })
@@ -106,7 +107,8 @@ export default function App() {
     setError('')
     setTxHash('')
     try {
-      const eventIdBytes = eventId.startsWith('0x') ? eventId : `0x${Buffer.from(eventId).toString('hex').padEnd(64, '0')}`
+      // keccak256 matches how hardhat tasks hash the event ID on registration
+      const eventIdBytes = eventId.startsWith('0x') ? eventId : keccak256(toUtf8Bytes(eventId))
       const iface = new Interface(TREASURY_ABI)
       const data = iface.encodeFunctionData('claimDisbursement', [eventIdBytes]) as `0x${string}`
       setStatusMsg('Approve the transaction in your wallet...')
@@ -184,7 +186,7 @@ export default function App() {
             className={styles.input}
             value={eventId}
             onChange={e => { setEventId(e.target.value); setRecipientStatus(null) }}
-            placeholder="disaster-event-id or 0x..."
+            placeholder="MMR-EQ-2025-M77 or 0x<bytes32>"
           />
 
           <div className={styles.btnRow}>
