@@ -214,6 +214,21 @@ Enforced by `ReliefTreasury.sol` regardless of what the CRE workflow sends:
 | Raw CSV hashing | Hash differs across OS line endings | Canonical normalization before SHA-256 |
 | No `EventStatus.Rejected` | Failed verification leaves event in `Pending`; admin closes manually | `Rejected` status + `EventRejected` event |
 | Sequential `processRoster` | Large rosters require sequential processing | Worker queue + batch API endpoints |
+| Privy embedded wallet signing | Email/Google login users cannot sign claim transactions until the Privy app's recovery method is configured in the Privy dashboard | See below |
+
+### Privy Embedded Wallet — Recovery Method Required
+
+Recipients who sign in with **email or Google** get a Privy embedded wallet. Privy's embedded wallets use a 2-of-3 threshold key system. To sign a transaction, Privy must reconstruct the key using a recovery share. **Until the Privy app is configured with a recovery method, signing fails with "Recovery method not supported" and recipients cannot claim.**
+
+**Fix (app owner):** Log into [privy.io/dashboard](https://privy.io/dashboard) → select this app → **Embedded Wallets → Recovery → enable "Privy-managed recovery"**. With Privy-managed recovery, Privy holds the recovery share server-side — no user action required. All email/Google users can then sign transactions immediately.
+
+**Workaround (testing without dashboard access):** Have testers sign in using **Connect Wallet → MetaMask** instead of email/Google. MetaMask handles signing directly and has no recovery method dependency. To register a MetaMask address as eligible, run:
+
+```bash
+npx ts-node --project tsconfig.json scripts/injectEligibility.ts --event-id 0x<EVENT_ID> --recipient 0x<METAMASK_ADDRESS> --tier 1
+```
+
+This script is an admin-only helper that bypasses CRE and writes eligibility directly onchain. It is not a substitute for the full CRE pipeline in production.
 
 ---
 

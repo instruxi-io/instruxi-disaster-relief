@@ -1,6 +1,6 @@
 phone_or_ref,email,regionId,eligibilityStatus,payoutTier,first_name,last_name
-+15551234001,pmacedoflores0@gmail.com,US-CA,eligible,standard,Pedro,Macedo
-+15551234002,relief.victim2.test@gmail.com,US-CA,eligible,priority,Bob,Jones
-+15551234003,relief.victim3.test@gmail.com,US-CA,eligible,standard,Carol,White
-+15551234004,relief.unverified.test@gmail.com,US-CA,ineligible,none,Dan,Brown
-+15551234005,relief.victim5.test@gmail.com,US-CA,eligible,standard,Eve,Davis
++95991234001,pmacedoflores0@gmail.com,MM-MANDALAY,eligible,standard,Patricio,Macedo
++95991234002,relief.victim2.test@gmail.com,MM-MANDALAY,eligible,priority,Bob,Jones
++95991234003,relief.victim3.test@gmail.com,MM-MANDALAY,eligible,standard,Carol,White
++95991234004,relief.unverified.test@gmail.com,MM-MANDALAY,ineligible,none,Dan,Brown
++95991234005,relief.victim5.test@gmail.com,MM-MANDALAY,eligible,standard,Eve,Davis

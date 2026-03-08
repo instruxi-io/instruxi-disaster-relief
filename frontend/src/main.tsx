@@ -1,6 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { PrivyProvider } from '@privy-io/react-auth'
+import { sepolia } from 'viem/chains'
 import App from './App'
 
 const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID ?? ''
@@ -18,7 +19,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       },
       embeddedWallets: {
         createOnLogin: 'users-without-wallets',
+        requireUserPasswordOnCreate: false,
+        showWalletUIs: true,
       },
+      defaultChain: sepolia,
+      supportedChains: [sepolia],
     }}
   >
     <App />

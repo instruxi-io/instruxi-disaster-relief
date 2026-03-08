@@ -16,15 +16,16 @@ import "dotenv/config";
 // ── Types ─────────────────────────────────────────────────────────────────
 
 interface AttestationRecord {
-  id: string;
-  account_address: string;
-  asset_contract_address: string;
-  fractional_amount: number;
-  fractional_unit: string;
+  id: number;
+  contract_address: string;
   chain_id: number;
-  public: boolean;
+  attestation_type: string;
+  attestor_name: string;
+  attestation_data: string;   // JSON string — EIP-712 typed data
+  is_public: boolean;
   active: boolean;
   created_at?: string;
+  valid_from?: string;
 }
 
 interface ApiResponse<T> {
@@ -109,18 +110,33 @@ async function queryAttestations(treasuryAddress: string): Promise<void> {
   console.log(`Found ${attestations.length} attestation(s):\n`);
 
   for (const a of attestations) {
-    const amountDisplay = a.fractional_amount != null
-      ? `${(a.fractional_amount / 1e6).toFixed(6)} ${a.fractional_unit ?? "USDC"}`
-      : "—";
+    let amountDisplay = "—";
+    let account = "—";
+    try {
+      const eip712 = JSON.parse(a.attestation_data) as {
+        message?: { amount?: string; contractAddress?: string; nonce?: string }
+      };
+      const msg = eip712.message ?? {};
+      if (msg.amount) amountDisplay = `${(Number(msg.amount) / 1e6).toFixed(6)} USDC`;
+      // Recipient is embedded in the nonce: "cre-disbursement-0x..." or "cre-deposit-0x..."
+      if (msg.nonce) {
+        const match = msg.nonce.match(/(0x[0-9a-fA-F]{40})/);
+        if (match) account = match[1];
+      }
+    } catch {}
+
+    const typeLabel = a.attestation_type === "proof_of_reserve" ? "proof-of-disbursement"
+                    : a.attestation_type === "net_asset_value"  ? "proof-of-funds"
+                    : a.attestation_type;
+
     console.log(`  ID:          ${a.id}`);
-    console.log(`  Account:     ${a.account_address}`);
+    console.log(`  Type:        ${typeLabel}`);
+    console.log(`  Account:     ${account}`);
     console.log(`  Amount:      ${amountDisplay}`);
     console.log(`  Active:      ${a.active}`);
-    console.log(`  Public:      ${a.public}`);
+    console.log(`  Public:      ${a.is_public}`);
     console.log(`  Chain ID:    ${a.chain_id}`);
-    if (a.created_at) {
-      console.log(`  Created:     ${a.created_at}`);
-    }
+    if (a.created_at) console.log(`  Created:     ${a.created_at}`);
     console.log("  " + "─".repeat(68));
   }
 }

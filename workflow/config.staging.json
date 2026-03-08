@@ -8,6 +8,7 @@
     "baseUrl": "https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer",
     "eligibilityGroupPrefix": "Eligible:",
     "rwGatewayUrl": "https://rwa-gateway-staging.instruxi.dev",
-    "policyId": ""
+    "policyId": "",
+    "contractDeploymentId": 38
   }
 }

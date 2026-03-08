@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
-import { usePrivy, useWallets } from '@privy-io/react-auth'
-import { BrowserProvider, Contract, formatUnits } from 'ethers'
+import { usePrivy, useWallets, useSendTransaction } from '@privy-io/react-auth'
+import { JsonRpcProvider, Contract, Interface } from 'ethers'
 import styles from './App.module.css'
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -9,13 +9,13 @@ const ENFORCER_URL = import.meta.env.VITE_ENFORCER_URL
   ?? 'https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer'
 const TREASURY_ADDRESS = import.meta.env.VITE_TREASURY_ADDRESS ?? ''
 const DEFAULT_EVENT_ID = import.meta.env.VITE_DEFAULT_EVENT_ID ?? ''
+const SEPOLIA_RPC = import.meta.env.VITE_SEPOLIA_RPC ?? 'https://rpc.sepolia.org'
 
 // Minimal ABI — only what the frontend needs
 const TREASURY_ABI = [
   'function claimDisbursement(bytes32 eventId) external',
-  'function eligible(bytes32 eventId, address recipient) external view returns (uint8)',
-  'function disbursed(bytes32 eventId, address recipient) external view returns (bool)',
-  'function getEventRecord(bytes32 eventId) external view returns (tuple(bytes32 id, string name, uint8 status, uint256 cap, uint256 disbursed, uint256 tierAmounts, address admin))',
+  'function getEligibilityTier(bytes32 eventId, address recipient) external view returns (uint8)',
+  'function hasClaimed(bytes32 eventId, address recipient) external view returns (bool)',
 ]
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -61,6 +61,7 @@ async function registerWithEnforcer(privyToken: string, walletAddress: string): 
 export default function App() {
   const { ready, authenticated, user, login, logout, getAccessToken } = usePrivy()
   const { wallets } = useWallets()
+  const { sendTransaction } = useSendTransaction()
 
   const [eventId, setEventId] = useState(DEFAULT_EVENT_ID)
   const [step, setStep] = useState<Step>('idle')
@@ -86,11 +87,11 @@ export default function App() {
     setStep('checking')
     setError('')
     try {
-      const provider = new BrowserProvider(await wallet.getEthereumProvider())
+      const provider = new JsonRpcProvider(SEPOLIA_RPC)
       const contract = new Contract(TREASURY_ADDRESS, TREASURY_ABI, provider)
       const eventIdBytes = eventId.startsWith('0x') ? eventId : `0x${Buffer.from(eventId).toString('hex').padEnd(64, '0')}`
-      const tier: bigint = await contract.eligible(eventIdBytes, walletAddress)
-      const claimed: boolean = await contract.disbursed(eventIdBytes, walletAddress)
+      const tier: bigint = await contract.getEligibilityTier(eventIdBytes, walletAddress)
+      const claimed: boolean = await contract.hasClaimed(eventIdBytes, walletAddress)
       setRecipientStatus({ eligible: Number(tier), disbursed: claimed })
       setStep('idle')
     } catch (e: any) {
@@ -105,14 +106,12 @@ export default function App() {
     setError('')
     setTxHash('')
     try {
-      const provider = new BrowserProvider(await wallet.getEthereumProvider())
-      const signer = await provider.getSigner()
-      const contract = new Contract(TREASURY_ADDRESS, TREASURY_ABI, signer)
       const eventIdBytes = eventId.startsWith('0x') ? eventId : `0x${Buffer.from(eventId).toString('hex').padEnd(64, '0')}`
-      const tx = await contract.claimDisbursement(eventIdBytes)
-      setStatusMsg('Transaction submitted — waiting for confirmation...')
-      await tx.wait()
-      setTxHash(tx.hash)
+      const iface = new Interface(TREASURY_ABI)
+      const data = iface.encodeFunctionData('claimDisbursement', [eventIdBytes]) as `0x${string}`
+      setStatusMsg('Approve the transaction in your wallet...')
+      const receipt = await sendTransaction({ to: TREASURY_ADDRESS as `0x${string}`, data, chainId: 11155111 })
+      setTxHash(receipt.transactionHash)
       setRecipientStatus(s => s ? { ...s, disbursed: true } : s)
       setStep('done')
     } catch (e: any) {

@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { HardhatUserConfig } from "hardhat/config";
 import "@nomicfoundation/hardhat-toolbox";
 import "hardhat-deploy";
@@ -51,10 +52,7 @@ const config: HardhatUserConfig = {
     },
   },
   etherscan: {
-    apiKey: {
-      sepolia: process.env.ETHERSCAN_API_KEY || "",
-      arbitrumSepolia: process.env.ARBISCAN_API_KEY || "",
-    },
+    apiKey: process.env.ETHERSCAN_API_KEY || "",
   },
 };
 

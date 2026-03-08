@@ -21,3 +21,6 @@ scripts/_inspect_swagger.js
 scripts/_test_wallet.js
 
 frontend/tsconfig.tsbuildinfo
+frontend/.env
+
+# Internal — do not publish

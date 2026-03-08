@@ -47,8 +47,9 @@ export type WorkflowConfig = {
   instruxi: {
     baseUrl: string;
     eligibilityGroupPrefix: string;
-    rwGatewayUrl: string;   // RWA Gateway base URL for CRE webhook notifications
-    policyId: string;       // OPA policy ID for disbursement authorization
+    rwGatewayUrl: string;          // RWA Gateway base URL for CRE webhook notifications
+    policyId: string;              // OPA policy ID for disbursement authorization
+    contractDeploymentId: number;  // RWA Gateway contract deployment ID for attestations
   };
 };
 

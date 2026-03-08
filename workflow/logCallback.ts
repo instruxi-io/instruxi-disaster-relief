@@ -64,6 +64,13 @@ const ELIGIBILITY_REPORT_PARAMS        = parseAbiParameters("bytes32, address[],
 const PREFIX_EVENT_VERIFICATION = "01" as const;
 const PREFIX_ELIGIBILITY        = "02" as const;
 
+// ── Base64 helper (btoa is not available in the CRE WASM runtime) ─────────
+function toBase64(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  const hex = `0x${Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')}` as `0x${string}`;
+  return hexToBase64(hex);
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────
 
 interface ExternalRef {
@@ -235,7 +242,7 @@ function checkRecipientEligibility(
       "Content-Type": "application/json",
       "x-api-key": apiKey,
     },
-    body: btoa(JSON.stringify({
+    body: toBase64(JSON.stringify({
       policy_id: policyId,
       input: { action: "claim_disbursement", recipient, eventId },
     })),
@@ -290,7 +297,7 @@ function notifyGateway(
         "Content-Type":  "application/json",
         "Authorization": `Bearer ${gatewayJwt}`,
       },
-      body: btoa(JSON.stringify(payload)),
+      body: toBase64(JSON.stringify(payload)),
     }).result();
     runtime.log(`[Gateway] CRE webhook → ${res.statusCode}`);
   } catch (err) {
@@ -474,21 +481,48 @@ function handleEligibilityRegistration(
  */
 function createInstruxiAttestation(
   runtime: Runtime<WorkflowConfig>,
-  body: {
-    account_address: string;
-    asset_contract_address: string;
-    fractional_amount: number;
-    fractional_decimals: number;
-    fractional_token_contract_address: string;
-    fractional_unit: string;
-    token_id: number;
-    chain_id: number;
-    public: boolean;
-    active: boolean;
-  }
+  attestationType: "net_asset_value" | "proof_of_reserve",
+  message: Record<string, unknown>
 ): string {
-  const { rwGatewayUrl } = runtime.config.instruxi;
+  const { rwGatewayUrl, contractDeploymentId, } = runtime.config.instruxi;
   const adminJwt = runtime.getSecret({ id: "INSTRUXI_ADMIN_JWT" }).result().value ?? "";
+
+  const primaryType = attestationType === "net_asset_value" ? "NAVAttestation" : "PORAttestation";
+  const navFields = [
+    { name: "contractAddress",    type: "address" },
+    { name: "navContractAddress", type: "address" },
+    { name: "decimals",           type: "uint8"   },
+    { name: "amount",             type: "uint256" },
+    { name: "cumulativeAmount",   type: "uint256" },
+    { name: "validFrom",          type: "string"  },
+    { name: "validTo",            type: "string"  },
+    { name: "nonce",              type: "string"  },
+  ];
+  const porFields = [
+    { name: "contractAddress",    type: "address" },
+    { name: "porContractAddress", type: "address" },
+    { name: "decimals",           type: "uint8"   },
+    { name: "amount",             type: "uint256" },
+    { name: "cumulativeAmount",   type: "uint256" },
+    { name: "validFrom",          type: "string"  },
+    { name: "validTo",            type: "string"  },
+    { name: "nonce",              type: "string"  },
+  ];
+
+  const eip712Data = {
+    types:       { [primaryType]: attestationType === "net_asset_value" ? navFields : porFields },
+    primaryType,
+    domain:      { name: "InstruxiAttestation", version: "1", chainId: String(runtime.config.chainId) },
+    message,
+  };
+
+  const body = {
+    contract_deployment_id: contractDeploymentId,
+    attestation_type: attestationType,
+    attestor_name: "Instruxi Relief Treasury",
+    attestation_data: JSON.stringify(eip712Data),
+    active: true,
+  };
 
   const http = new cre.capabilities.HTTPClient();
   const res = http.sendRequest(runtime, {
@@ -498,19 +532,19 @@ function createInstruxiAttestation(
       "Content-Type":  "application/json",
       "Authorization": `Bearer ${adminJwt}`,
     },
-    body: btoa(JSON.stringify(body)),
+    body: toBase64(JSON.stringify(body)),
   }).result();
 
   if (res.statusCode >= 500) {
     throw new Error(`[Attestation] Server error ${res.statusCode} — DON will retry`);
   }
   if (res.statusCode === 401 || res.statusCode === 403) {
-    throw new Error(`[Attestation] Auth error ${res.statusCode} — check INSTRUXI_API_KEY / INSTRUXI_ADMIN_JWT`);
+    throw new Error(`[Attestation] Auth error ${res.statusCode} — check INSTRUXI_ADMIN_JWT`);
   }
 
   const bodyStr = new TextDecoder().decode(res.body);
-  const parsed = JSON.parse(bodyStr) as { data?: { id?: string }; success?: boolean };
-  const id = parsed.data?.id ?? "";
+  const parsed = JSON.parse(bodyStr) as { data?: { id?: string; attestation_id?: string }; success?: boolean };
+  const id = parsed.data?.id ?? parsed.data?.attestation_id ?? "";
   if (!id) throw new Error(`[Attestation] createAttestation returned no id: ${bodyStr}`);
   return id;
 }
@@ -535,7 +569,7 @@ function publishInstruxiAttestation(
       "Content-Type":  "application/json",
       "Authorization": `Bearer ${adminJwt}`,
     },
-    body: btoa(JSON.stringify({ id: attestationId })),
+    body: toBase64(JSON.stringify({ id: attestationId })),
   }).result();
 
   if (res.statusCode >= 500) {
@@ -611,17 +645,16 @@ export function onDisbursed(runtime: Runtime<WorkflowConfig>, log: EVMLog): stri
 
   const cfg = runtime.config;
 
-  const attestationId = createInstruxiAttestation(runtime, {
-    account_address:                   recipient,
-    asset_contract_address:            cfg.reliefTreasuryAddress,
-    fractional_amount:                 Number(amount),
-    fractional_decimals:               6,
-    fractional_token_contract_address: cfg.usdcAddress,
-    fractional_unit:                   "USDC",
-    token_id:                          0,
-    chain_id:                          cfg.chainId,
-    public:                            true,
-    active:                            true,
+  const now = new Date();
+  const attestationId = createInstruxiAttestation(runtime, "proof_of_reserve", {
+    contractAddress:    cfg.reliefTreasuryAddress,
+    porContractAddress: cfg.usdcAddress,
+    decimals:           6,
+    amount:             String(amount),
+    cumulativeAmount:   String(amount),
+    validFrom:          now.toISOString(),
+    validTo:            new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+    nonce:              `cre-disbursement-${recipient}-${now.getTime()}`,
   });
 
   runtime.log(`[Attestation] Created proof-of-disbursement id=${attestationId}`);
@@ -658,17 +691,16 @@ export function onDeposited(runtime: Runtime<WorkflowConfig>, log: EVMLog): stri
 
   const cfg = runtime.config;
 
-  const attestationId = createInstruxiAttestation(runtime, {
-    account_address:                   depositor,
-    asset_contract_address:            cfg.reliefTreasuryAddress,
-    fractional_amount:                 Number(amount),
-    fractional_decimals:               6,
-    fractional_token_contract_address: cfg.usdcAddress,
-    fractional_unit:                   "USDC",
-    token_id:                          0,
-    chain_id:                          cfg.chainId,
-    public:                            true,
-    active:                            true,
+  const now = new Date();
+  const attestationId = createInstruxiAttestation(runtime, "net_asset_value", {
+    contractAddress:    cfg.reliefTreasuryAddress,
+    navContractAddress: cfg.usdcAddress,
+    decimals:           6,
+    amount:             String(amount),
+    cumulativeAmount:   String(amount),
+    validFrom:          now.toISOString(),
+    validTo:            new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    nonce:              `cre-deposit-${depositor}-${now.getTime()}`,
   });
 
   runtime.log(`[Attestation] Created proof-of-funds id=${attestationId}`);
