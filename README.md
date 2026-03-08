@@ -1,11 +1,8 @@
 # CRE-Orchestrated Disaster Relief Distribution
 
-A transparent disbursement platform for humanitarian aid organizations, built on Instruxi + Chainlink CRE + Privy. Any relief org worldwide can deploy this, fund a USDC treasury, and run tamper-proof payouts - with every step publicly auditable onchain.
+A transparent disbursement platform for humanitarian aid organizations, built on Instruxi + Chainlink CRE + Privy. Any relief org worldwide can deploy this, fund a USDC treasury, and run tamper-proof payouts with every step publicly auditable onchain.
 
-Chainlink CRE runs two onchain-write pipelines: disaster event verification (2-of-3 external API consensus against live global disaster databases) and recipient eligibility registration (OPA policy validation). Once CRE writes eligibility onchain, eligible recipients claim directly. Every action - deposit, eligibility write, disbursement - produces a cryptographic TrustSync attestation.
-
-> **Hackathon track:** Chainlink CRE
-> **Stack:** Instruxi Enforcer · Instruxi Object Storage · TrustSync Attestations · Chainlink CRE · Solidity · Hardhat · Privy
+Chainlink CRE runs four pipelines: disaster event verification (2-of-3 external API consensus against live global disaster databases), recipient eligibility registration (OPA policy validation), proof-of-disbursement attestation (TrustSync record created via Instruxi RWA Gateway on every payout), and proof-of-funds attestation (TrustSync record on every deposit). Once CRE writes eligibility onchain, eligible recipients claim directly.
 
 ---
 
