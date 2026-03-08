@@ -40,7 +40,7 @@ This platform is designed for adoption by NGOs, UN agencies, and government aid 
 |                  (register · profile · groups · authorize)              |
 |                                                                         |
 +-----------------------------------+-------------------------------------+
-                                    | emit RequestSent
+                                    | emit RequestSent / Disbursed / Deposited
                                     v
 +-------------------------------------------------------------------------+
 |                          ONCHAIN LAYER                                  |
@@ -49,36 +49,32 @@ This platform is designed for adoption by NGOs, UN agencies, and government aid 
 |   +--------------------------------------------------------------------+|
 |   |  Pipeline 1: registerEvent() -> requestEventVerification()         ||
 |   |  Pipeline 2: requestEligibilityRegistration(addrs[], tiers[])      ||
-|   |  Claim:      claimDisbursement() -> reads _eligible -> transfer    ||
+|   |  Pipeline 3: claimDisbursement() emits Disbursed (CRE trigger)     ||
+|   |  Pipeline 4: deposit() emits Deposited (CRE trigger)               ||
 |   |  Invariants: caps · no-double-pay · eligibility gate               ||
 |   +--------------------------------------------------------------------+|
-|          | RequestSent event              ^ onReport(metadata, report)  |
-+----------+--------------------------------+-----------------------------++
-           |                                |
-           v                                |
+|     | RequestSent event          ^ onReport(metadata, report)           |
+|     | Disbursed event            |                                      |
+|     | Deposited event            |                                      |
++-----+----------------------------+--------------------------------------+
+      |                            |
+      v                            |
 +--------------------------------------------------------------------------+
 |                      CHAINLINK CRE WORKFLOW                              |
 |                                                                          |
-|  workflow/main.ts  ── EVM Log Trigger on RequestSent                     |
-|  workflow/logCallback.ts                                                 |
+|  workflow/main.ts + workflow/logCallback.ts                              |
 |                                                                          |
-|  requestType = "event_verification"   requestType = "eligibility_registration"
-|         |                                    |                           |
-|         v                                    v                           |
-|  USGS + GDACS + NASA EONET        For each candidate wallet:             |
-|  (2-of-3 consensus on real        POST /enforcer/auth/authorize (OPA)   |
-|   live disaster databases)        Only approved wallets → onReport      |
-|         |                                    |                           |
-|         +── onReport(0x01 + encode(requestId, verified)) ──────────────+|
-|              onReport(0x02 + encode(requestId, addrs[], tiers[]))        |
+|  Pipeline 1: event_verification        Pipeline 2: eligibility_reg      |
+|    USGS + GDACS + NASA EONET             POST /enforcer/auth/authorize   |
+|    2-of-3 consensus                      OPA policy per wallet           |
+|    onReport(0x01 + requestId, verified)  onReport(0x02 + addrs, tiers)  |
 |                                                                          |
-|         +──── POST /api/webhooks/cre (RWA Gateway) ──────────────+     |
+|  Pipeline 3: Disbursed event           Pipeline 4: Deposited event      |
+|    POST /api/attestations (RWA GW)       POST /api/attestations (RWA GW)|
+|    proof-of-disbursement (EIP-712)       proof-of-funds (EIP-712)       |
+|    POST /api/attestations/publish        POST /api/attestations/publish  |
+|    TrustSync attestation per payout      TrustSync attestation on deposit|
 +--------------------------------------------------------------------------+
-                                                                    |
-                                                                    v
-                                                      RWA Gateway webhook
-                                                      → TrustSync attestation
-                                                      (auto on every fulfillment)
 ```
 
 ---
