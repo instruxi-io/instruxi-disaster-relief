@@ -1,6 +1,6 @@
-# Runbook — End-to-End Setup and Execution
+# Runbook - End-to-End Setup and Execution
 
-This guide walks a new operator through every step to deploy the platform, run a real disaster event through the CRE verification pipeline, process a recipient roster, and execute a claim — from zero to a fully attested disbursement.
+This guide walks a new operator through every step to deploy the platform, run a real disaster event through the CRE verification pipeline, process a recipient roster, and execute a claim - from zero to a fully attested disbursement.
 
 > **What you'll need from Instruxi:** An API key, tenant ID, and access to the RWA Gateway. Contact the Instruxi team if you don't have these.
 
@@ -15,7 +15,7 @@ This guide walks a new operator through every step to deploy the platform, run a
 | Node.js | 20+ | [nodejs.org](https://nodejs.org) |
 | Bun | Latest | `curl -fsSL https://bun.sh/install \| bash` |
 | CRE CLI | 1.3.0+ | Download from [Chainlink CRE releases](https://github.com/smartcontractkit/cre-cli/releases) and add to PATH |
-| Git | Any | — |
+| Git | Any | - |
 
 Verify:
 ```bash
@@ -26,23 +26,23 @@ cre version        # 1.3.0+
 
 ### Accounts and Credentials
 
-Gather everything before starting — each step blocks on having these ready.
+Gather everything before starting - each step blocks on having these ready.
 
 | Credential | How to get it | Used in |
 |---|---|---|
 | **EVM wallet + private key** | MetaMask, cast, or any EVM keygen | `.env` as `DEPLOYER_PRIVATE_KEY` |
 | **Sepolia ETH (≥ 0.1)** | [Google Sepolia faucet](https://cloud.google.com/application/web3/faucet/ethereum/sepolia) or [Alchemy faucet](https://sepoliafaucet.com) | Gas for deployment + transactions |
-| **Sepolia USDC** | [Circle testnet faucet](https://faucet.circle.com) — select Sepolia, request USDC | Fund treasury for disbursements |
+| **Sepolia USDC** | [Circle testnet faucet](https://faucet.circle.com) - select Sepolia, request USDC | Fund treasury for disbursements |
 | **Alchemy API key** | [alchemy.com](https://alchemy.com) → Create App → Ethereum Sepolia | `.env` as `ALCHEMY_API_KEY` |
 | **Etherscan API key** | [etherscan.io](https://etherscan.io) → My Account → API Keys | Contract verification (optional but recommended) |
 | **Instruxi API key** | Instruxi team | `.env` as `INSTRUXI_API_KEY` |
 | **Instruxi Tenant ID** | Instruxi team | `.env` as `INSTRUXI_TENANT_ID` |
-| **Instruxi Admin JWT** | Log into your Instruxi-connected app (Privy), copy the JWT from browser DevTools → Application → Local Storage. Expires every hour — refresh before running scripts. | `.env` as `INSTRUXI_ADMIN_JWT` and `RWA_GATEWAY_JWT` |
+| **Instruxi Admin JWT** | Log into your Instruxi-connected app (Privy), copy the JWT from browser DevTools → Application → Local Storage. Expires every hour - refresh before running scripts. | `.env` as `INSTRUXI_ADMIN_JWT` and `RWA_GATEWAY_JWT` |
 | **CRE account** | `cre login` (you'll be prompted) | CRE simulation |
 
 ---
 
-## Step 1 — Clone and Install
+## Step 1 - Clone and Install
 
 ```bash
 git clone https://github.com/instruxi-io/instruxi-disaster-relief
@@ -53,13 +53,13 @@ npm install
 Install the CRE workflow dependencies (requires Bun):
 ```bash
 cd workflow
-bun install      # runs bunx cre-setup internally — downloads Javy runtime
+bun install      # runs bunx cre-setup internally - downloads Javy runtime
 cd ..
 ```
 
 ---
 
-## Step 2 — Configure Environment
+## Step 2 - Configure Environment
 
 ```bash
 cp .env.example .env
@@ -98,7 +98,7 @@ RELIEF_TREASURY_ADDRESS=
 
 ---
 
-## Step 3 — Configure CRE Project Files
+## Step 3 - Configure CRE Project Files
 
 The CRE CLI needs two files at the project root (alongside `workflow/`).
 
@@ -139,7 +139,7 @@ cre login
 
 ---
 
-## Step 4 — Deploy the Contract
+## Step 4 - Deploy the Contract
 
 ```bash
 npx hardhat deploy --network sepolia
@@ -176,14 +176,14 @@ RELIEF_TREASURY_ADDRESS=0x<CONTRACT_ADDRESS>
 }
 ```
 
-Leave `policyId` empty unless you have a configured Instruxi OPA policy. **When empty, all candidates submitted by the admin are approved by CRE — OPA validation is skipped entirely, and eligibility is effectively admin-controlled.** This is acceptable for staging. For production, populate `policyId` with your Instruxi OPA policy ID before going live.
+Leave `policyId` empty unless you have a configured Instruxi OPA policy. **When empty, all candidates submitted by the admin are approved by CRE - OPA validation is skipped entirely, and eligibility is effectively admin-controlled.** This is acceptable for staging. For production, populate `policyId` with your Instruxi OPA policy ID before going live.
 
 ### Register the contract in the RWA Gateway
 
 CRE Pipelines 3 and 4 create TrustSync attestations via the RWA Gateway. The gateway requires both the `ReliefTreasury` and the USDC token to be registered in its contract registry first. Run these two commands, then update `contractDeploymentId` in `workflow/config.staging.json` with the `id` returned from the first call.
 
 ```bash
-# Register ReliefTreasury — note the "id" in the response
+# Register ReliefTreasury - note the "id" in the response
 curl -X POST "$RWA_GATEWAY_URL/api/admin/contracts" \
   -H "Authorization: Bearer $RWA_GATEWAY_JWT" \
   -H "Content-Type: application/json" \
@@ -229,7 +229,7 @@ npx hardhat verify --network sepolia \
 
 ---
 
-## Step 5 — Set Up Instruxi Groups
+## Step 5 - Set Up Instruxi Groups
 
 Create the Enforcer group hierarchy for your program. Groups encode the tier number in their name suffix (`:1` = standard, `:2` = priority).
 
@@ -247,11 +247,11 @@ Expected output:
 ✅ Created group: Eligible:MMR-EQ-2025:MMR-MDY:2  (id: <TIER2_MDY_ID>)
 ```
 
-**Save these group IDs** — you'll need the tier group IDs in Step 9.
+**Save these group IDs** - you'll need the tier group IDs in Step 9.
 
 ---
 
-## Step 6 — Fund the Treasury
+## Step 6 - Fund the Treasury
 
 Get Circle testnet USDC from the [Circle faucet](https://faucet.circle.com) (select Ethereum Sepolia). Then deposit into the treasury:
 
@@ -263,13 +263,13 @@ npx hardhat deposit-usdc --network sepolia \
 # 10000000000 = $10,000 USDC (6 decimals)
 ```
 
-> **Note:** `hardhat.config.ts` uses `import "dotenv/config"`, so Hardhat automatically loads your `.env` before any task runs. No need to prefix commands with env vars — just ensure `.env` is populated.
+> **Note:** `hardhat.config.ts` uses `import "dotenv/config"`, so Hardhat automatically loads your `.env` before any task runs. No need to prefix commands with env vars - just ensure `.env` is populated.
 
-**Save the deposit transaction hash** — you'll need it for CRE Pipeline 4 (proof-of-funds attestation) in Step 14.
+**Save the deposit transaction hash** - you'll need it for CRE Pipeline 4 (proof-of-funds attestation) in Step 14.
 
 ---
 
-## Step 7 — Choose a Real Disaster Event
+## Step 7 - Choose a Real Disaster Event
 
 For the demo to meaningfully verify against real live data, use an actual disaster event that appears in the GDACS red-alert database.
 
@@ -277,10 +277,10 @@ For the demo to meaningfully verify against real live data, use an actual disast
 
 1. Go to [gdacs.org](https://www.gdacs.org)
 2. Click any red alert event
-3. The URL will contain `eventid=XXXXXXX` — that number is your `gdacsId`
+3. The URL will contain `eventid=XXXXXXX` - that number is your `gdacsId`
 4. Click **Details** on the event page to confirm the event type and affected country
 
-### Current example — Myanmar M7.7 Earthquake
+### Current example - Myanmar M7.7 Earthquake
 
 | Field | Value |
 |-------|-------|
@@ -296,9 +296,9 @@ This event is confirmed in the GDACS red-alert database and will return a match 
 
 ---
 
-## Step 8 — Register the Event Onchain
+## Step 8 - Register the Event Onchain
 
-Compute the event ID. Use any unique human-readable string — it gets hashed to `bytes32` via `keccak256`. The hardhat tasks, scripts, and frontend all use the same keccak256 hash, so you can pass the human-readable string anywhere and it will resolve to the same onchain ID.
+Compute the event ID. Use any unique human-readable string - it gets hashed to `bytes32` via `keccak256`. The hardhat tasks, scripts, and frontend all use the same keccak256 hash, so you can pass the human-readable string anywhere and it will resolve to the same onchain ID.
 
 ```bash
 # With Node:
@@ -334,7 +334,7 @@ Registering event 0x<EVENT_ID>:
 
 ---
 
-## Step 9 — CRE Pipeline 1: Verify the Disaster Event
+## Step 9 - CRE Pipeline 1: Verify the Disaster Event
 
 Request verification. The `--ref` JSON is passed to the CRE workflow and used to query the external APIs:
 
@@ -353,7 +353,7 @@ Requesting verification for event 0x<EVENT_ID>...
    Tx: 0x<TX_HASH>
 ```
 
-**Save the `Tx:` hash** — it goes into the CRE simulation.
+**Save the `Tx:` hash** - it goes into the CRE simulation.
 
 ### Run CRE Pipeline 1 Simulation
 
@@ -370,12 +370,12 @@ cre workflow simulate workflow \
 
 Expected logs:
 ```
-[USGS] No usgsId provided — skipping
+[USGS] No usgsId provided - skipping
 [GDACS] GET https://www.gdacs.org/gdacsapi/...
 [GDACS] Event 1474477 found: true
 [EONET] GET https://eonet.gsfc.nasa.gov/api/v3/events?status=open&limit=5
 [EONET] 5 open natural event(s) → true
-[Consensus] USGS=false GDACS=true ReliefWeb=true → 2/3
+[Consensus] USGS=false GDACS=true EONET=true → 2/3
 [Result] verified=true
 [Write] ✓ tx=0x<ONCHAIN_TX>
 ```
@@ -392,7 +392,7 @@ npx hardhat treasury-status --network sepolia \
 
 ---
 
-## Step 10 — Upload and Process Recipient Roster
+## Step 10 - Upload and Process Recipient Roster
 
 ### Prepare the CSV
 
@@ -406,7 +406,7 @@ phone_or_ref,email,regionId,eligibilityStatus,payoutTier,first_name,last_name
 +9519100004,victim4@example.com,MMR-YGN,ineligible,none,Htun,Oo
 ```
 
-> **Email must be real and deliverable.** The RWA Gateway provisions a Privy embedded wallet tied to this email address. When the recipient later logs in with this email via your frontend, Privy restores their pre-provisioned wallet — the exact address already registered onchain.
+> **Email must be real and deliverable.** The RWA Gateway provisions a Privy embedded wallet tied to this email address. When the recipient later logs in with this email via your frontend, Privy restores their pre-provisioned wallet - the exact address already registered onchain.
 
 ### Upload to Object Storage
 
@@ -453,7 +453,7 @@ Eligible wallets:  0xAbCd..., 0xEfGh..., 0xIjKl...
 Tiers:             1, 2, 1
 ```
 
-**Save the wallet addresses and tiers** — they go into Step 11.
+**Save the wallet addresses and tiers** - they go into Step 11.
 
 ### Anchor the Roster Hash Onchain
 
@@ -479,7 +479,7 @@ This emits `RosterAnchored(rosterHash, eventId, program, region)` onchain. Anyon
 
 ---
 
-## Step 11 — CRE Pipeline 2: Register Eligibility Onchain
+## Step 11 - CRE Pipeline 2: Register Eligibility Onchain
 
 Submit the eligible wallet addresses (from `processRoster` output) to CRE for OPA validation. CRE validates each wallet and writes `_eligible[eventId][addr] = tier` onchain.
 
@@ -521,7 +521,7 @@ Expected logs:
 [Write] ✓ tx=0x<ONCHAIN_TX>
 ```
 
-The contract emits `EligibilitySet(eventId, recipient, tier)` for each approved wallet. Verify on Etherscan — look for these events on your contract.
+The contract emits `EligibilitySet(eventId, recipient, tier)` for each approved wallet. Verify on Etherscan - look for these events on your contract.
 
 Verify eligibility for a specific address:
 ```bash
@@ -535,7 +535,7 @@ c.getEligibilityTier(ethers.keccak256(ethers.toUtf8Bytes('MMR-EQ-2025-M77')),'0x
 
 ---
 
-## Step 12 — Claim Disbursement
+## Step 12 - Claim Disbursement
 
 Recipients claim via the frontend (Privy login → SIWE → `claimDisbursement` contract call). For direct testing, use the Hardhat task with the eligible wallet's private key.
 
@@ -553,16 +553,16 @@ Claiming disbursement for event 0x... (tier 1)...
    Tx: 0x<TX_HASH>
 ```
 
-**Save the `Tx:` hash** — it goes into the Pipeline 3 simulation.
+**Save the `Tx:` hash** - it goes into the Pipeline 3 simulation.
 
-### Frontend Claim — Privy Embedded Wallet Limitation
+### Frontend Claim - Privy Embedded Wallet Limitation
 
-> **Important:** The frontend uses Privy embedded wallets (provisioned server-side via `processRoster`). Privy embedded wallets use a 2-of-3 threshold key system — signing requires a recovery method to be configured. If recovery is **not** set up in your Privy dashboard, the claim button will show a loading spinner that never resolves, and the browser console will log `"Recovery method not supported"`.
+> **Important:** The frontend uses Privy embedded wallets (provisioned server-side via `processRoster`). Privy embedded wallets use a 2-of-3 threshold key system - signing requires a recovery method to be configured. If recovery is **not** set up in your Privy dashboard, the claim button will show a loading spinner that never resolves, and the browser console will log `"Recovery method not supported"`.
 >
 > **Fix (dashboard):** Log in to [privy.io/dashboard](https://privy.io/dashboard) → your app → **Embedded Wallets** → **Recovery** → enable **Privy-managed recovery**. Recipients must then complete recovery setup on first login.
 >
 > **Testing workaround (no dashboard access):** Use MetaMask as a non-provisioned test wallet:
-> 1. Connect MetaMask (or any injected wallet) via the "Connect Wallet" button on the frontend — this logs in without creating a Privy embedded wallet
+> 1. Connect MetaMask (or any injected wallet) via the "Connect Wallet" button on the frontend - this logs in without creating a Privy embedded wallet
 > 2. The wallet's address won't be in the eligible set from `processRoster`. Use `injectEligibility.ts` to write eligibility directly onchain for this address:
 >
 > ```bash
@@ -572,7 +572,7 @@ Claiming disbursement for event 0x... (tier 1)...
 >   --tier 1
 > ```
 >
-> This bypasses CRE Pipeline 2 by calling `requestEligibilityRegistration`, temporarily authorizing the deployer as a fulfiller, calling `onReport` directly with the eligibility payload, then revoking the authorization. Only use this for testing — production eligibility must go through CRE Pipeline 2.
+> This bypasses CRE Pipeline 2 by calling `requestEligibilityRegistration`, temporarily authorizing the deployer as a fulfiller, calling `onReport` directly with the eligibility payload, then revoking the authorization. Only use this for testing - production eligibility must go through CRE Pipeline 2.
 
 ### Configure the Frontend
 
@@ -594,7 +594,7 @@ VITE_ENFORCER_URL=https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer
 # From Step 4 deployment output
 VITE_TREASURY_ADDRESS=0x<CONTRACT_ADDRESS>
 
-# Alchemy Sepolia RPC — use this instead of public endpoints (more reliable)
+# Alchemy Sepolia RPC - use this instead of public endpoints (more reliable)
 VITE_SEPOLIA_RPC=https://eth-sepolia.g.alchemy.com/v2/<YOUR_ALCHEMY_KEY>
 
 # Optional: pre-fill event ID in the UI (bytes32 hex from Step 8)
@@ -612,7 +612,7 @@ npm run dev
 
 ---
 
-## Step 13 — CRE Pipeline 3: Proof-of-Disbursement Attestation
+## Step 13 - CRE Pipeline 3: Proof-of-Disbursement Attestation
 
 This runs automatically on the DON in production. For the simulation, trigger it against the disbursement transaction:
 
@@ -627,7 +627,7 @@ cre workflow simulate workflow \
   -R .
 ```
 
-> **`--evm-event-index 1`:** The claim transaction emits a USDC `Transfer` event first (index 0), then the `Disbursed` event (index 1). Pipeline 3 listens for `Disbursed` — use index 1, not 0.
+> **`--evm-event-index 1`:** The claim transaction emits a USDC `Transfer` event first (index 0), then the `Disbursed` event (index 1). Pipeline 3 listens for `Disbursed` - use index 1, not 0.
 
 Expected logs:
 ```
@@ -639,7 +639,7 @@ Expected logs:
 
 ---
 
-## Step 14 — CRE Pipeline 4: Proof-of-Funds Attestation
+## Step 14 - CRE Pipeline 4: Proof-of-Funds Attestation
 
 Trigger against the deposit transaction from Step 6 (save that tx hash when you fund the treasury):
 
@@ -656,7 +656,7 @@ cre workflow simulate workflow \
 
 ---
 
-## Step 15 — Query Attestations
+## Step 15 - Query Attestations
 
 Verify all attestations were created and published:
 
@@ -692,7 +692,7 @@ Found 2 attestation(s):
 
 ---
 
-## Step 16 — Check Final Treasury Status
+## Step 16 - Check Final Treasury Status
 
 ```bash
 npx hardhat treasury-status --network sepolia \
@@ -735,13 +735,13 @@ Privy embedded wallets require a recovery method to sign transactions. If recove
 
 **Dashboard fix:** Log in to [privy.io/dashboard](https://privy.io/dashboard) → your app → **Embedded Wallets** → **Recovery** → enable **Privy-managed recovery**.
 
-**Testing workaround:** Use MetaMask (click "Connect Wallet" on the frontend) instead of the Privy embedded wallet. Then use `injectEligibility.ts` to make the MetaMask address eligible — see Step 12 for the full command.
+**Testing workaround:** Use MetaMask (click "Connect Wallet" on the frontend) instead of the Privy embedded wallet. Then use `injectEligibility.ts` to make the MetaMask address eligible - see Step 12 for the full command.
 
-> **Why this happens:** The `processRoster` script provisions Privy server-side wallets tied to recipient emails. These are embedded wallets — they don't have a recovery shard set up until the user completes recovery setup on first login. The "Connect Wallet" path uses an injected wallet (MetaMask/Rabby) which signs normally.
+> **Why this happens:** The `processRoster` script provisions Privy server-side wallets tied to recipient emails. These are embedded wallets - they don't have a recovery shard set up until the user completes recovery setup on first login. The "Connect Wallet" path uses an injected wallet (MetaMask/Rabby) which signs normally.
 
 ### JWT expired (401 from Instruxi API)
 
-`INSTRUXI_ADMIN_JWT` and `RWA_GATEWAY_JWT` are Privy session tokens — they expire after 1 hour. Refresh by:
+`INSTRUXI_ADMIN_JWT` and `RWA_GATEWAY_JWT` are Privy session tokens - they expire after 1 hour. Refresh by:
 1. Opening your Instruxi-connected app in a browser
 2. Logging in (or refreshing the page to get a new token)
 3. Opening DevTools → Application → Local Storage → find the `privy:token` entry
@@ -775,7 +775,7 @@ The RWA Gateway uses Privy to provision wallets. If an email address is not real
 Check the simulation output for `verified=false`. This means fewer than 2 of the 3 APIs confirmed the event:
 - **GDACS not matching:** Verify your `gdacsId` appears at gdacs.org/default.aspx. Try `"region": "MMR"` without `gdacsId` to match any active event in the country.
 - **EONET returning 0:** Rare; retry. NASA EONET occasionally has maintenance windows.
-Each `requestEventVerification` call creates a new `requestId` — you can call it multiple times until you get a `verified=true` result.
+Each `requestEventVerification` call creates a new `requestId` - you can call it multiple times until you get a `verified=true` result.
 
 ---
 
@@ -789,7 +789,7 @@ For recording a demo video:
 - [ ] `processRoster` output showing wallet provisioning per recipient
 - [ ] `RosterAnchored` event on Etherscan (anyone can verify CSV integrity)
 - [ ] Pipeline 2 simulation output showing OPA validation + `EligibilitySet` events on Etherscan
-- [ ] `claimDisbursement` transaction — direct USDC transfer visible on Etherscan (no CRE at claim time)
+- [ ] `claimDisbursement` transaction - direct USDC transfer visible on Etherscan (no CRE at claim time)
 - [ ] Pipeline 3 simulation output showing proof-of-disbursement attestation ID
 - [ ] Pipeline 4 simulation output showing proof-of-funds attestation ID
 - [ ] `npm run query-attestations` output listing all published attestations

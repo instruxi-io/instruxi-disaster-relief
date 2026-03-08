@@ -1,8 +1,8 @@
 # CRE-Orchestrated Disaster Relief Distribution
 
-A transparent disbursement platform for humanitarian aid organizations, built on Instruxi + Chainlink CRE + Privy. Any relief org worldwide can deploy this, fund a USDC treasury, and run tamper-proof payouts — with every step publicly auditable onchain.
+A transparent disbursement platform for humanitarian aid organizations, built on Instruxi + Chainlink CRE + Privy. Any relief org worldwide can deploy this, fund a USDC treasury, and run tamper-proof payouts - with every step publicly auditable onchain.
 
-Chainlink CRE runs two onchain-write pipelines: disaster event verification (2-of-3 external API consensus against live global disaster databases) and recipient eligibility registration (OPA policy validation). Once CRE writes eligibility onchain, eligible recipients claim directly. Every action — deposit, eligibility write, disbursement — produces a cryptographic TrustSync attestation.
+Chainlink CRE runs two onchain-write pipelines: disaster event verification (2-of-3 external API consensus against live global disaster databases) and recipient eligibility registration (OPA policy validation). Once CRE writes eligibility onchain, eligible recipients claim directly. Every action - deposit, eligibility write, disbursement - produces a cryptographic TrustSync attestation.
 
 > **Hackathon track:** Chainlink CRE
 > **Stack:** Instruxi Enforcer · Instruxi Object Storage · TrustSync Attestations · Chainlink CRE · Solidity · Hardhat · Privy
@@ -16,7 +16,7 @@ Disaster relief is plagued by three interlinked problems: funds diverted before 
 This platform is designed for adoption by NGOs, UN agencies, and government aid programs that want to commit to transparency. The key properties:
 
 - **Disaster verification is not admin-controlled.** CRE queries real live data (GDACS global disaster alerts, NASA EONET, USGS earthquake catalog) and 2-of-3 APIs must confirm the event before the contract transitions to Active. No admin can open disbursements for a fake event.
-- **Eligibility is not admin-controlled — when `policyId` is set.** The Chainlink DON runs OPA policy validation on each recipient wallet and writes eligibility onchain. The admin cannot directly approve a recipient or bypass OPA. **Warning:** if `policyId` is left empty in `workflow/config.staging.json`, CRE skips OPA validation and approves all candidates submitted by the admin. This is the default for staging; set a real policy ID for production.
+- **Eligibility is not admin-controlled - when `policyId` is set.** The Chainlink DON runs OPA policy validation on each recipient wallet and writes eligibility onchain. The admin cannot directly approve a recipient or bypass OPA. **Warning:** if `policyId` is left empty in `workflow/config.staging.json`, CRE skips OPA validation and approves all candidates submitted by the admin. This is the default for staging; set a real policy ID for production.
 - **Every financial movement is cryptographically attested.** Deposits and disbursements automatically produce TrustSync attestations. Auditors can query the public attestation record without needing admin access.
 - **The roster is anchored, not stored.** The SHA-256 of the recipient CSV is committed onchain at processing time. Anyone can hash the original file and verify it was not tampered with after the fact.
 
@@ -36,7 +36,7 @@ This platform is designed for adoption by NGOs, UN agencies, and government aid 
 |        v                            v                       |           |
 |  scripts/setupGroups.ts      scripts/uploadRoster.ts        |           |
 |  scripts/processRoster.ts ← POST /privy/server-wallet        |           |
-|                               (RWA Gateway — provisions      |           |
+|                               (RWA Gateway - provisions      |           |
 |                                Privy wallet per recipient)   |           |
 |        |                                                     |           |
 |        +-------------- Instruxi Enforcer -------------------+           |
@@ -92,20 +92,20 @@ Four CRE EVM Log Triggers on a single workflow (`workflow/main.ts`):
 
 | Pipeline | `--trigger-index` | Trigger Event | Handler | Onchain Write |
 |----------|:-----------------:|---------------|---------|:-------------:|
-| 1 — Event Verification | 0 | `RequestSent(requestType="event_verification")` | 2-of-3 consensus: USGS + GDACS + EONET | `onReport(0x01 + encode(requestId, verified))` |
-| 2 — Eligibility Registration | 0 | `RequestSent(requestType="eligibility_registration")` | OPA batch validation per wallet | `onReport(0x02 + encode(requestId, addrs[], tiers[]))` |
-| 3 — Proof-of-Disbursement | 1 | `Disbursed(eventId, recipient, amount)` | TrustSync attestation create + publish | None (offchain side-effect) |
-| 4 — Proof-of-Funds | 2 | `Deposited(depositor, amount)` | TrustSync attestation create + publish | None (offchain side-effect) |
+| 1 - Event Verification | 0 | `RequestSent(requestType="event_verification")` | 2-of-3 consensus: USGS + GDACS + EONET | `onReport(0x01 + encode(requestId, verified))` |
+| 2 - Eligibility Registration | 0 | `RequestSent(requestType="eligibility_registration")` | OPA batch validation per wallet | `onReport(0x02 + encode(requestId, addrs[], tiers[]))` |
+| 3 - Proof-of-Disbursement | 1 | `Disbursed(eventId, recipient, amount)` | TrustSync attestation create + publish | None (offchain side-effect) |
+| 4 - Proof-of-Funds | 2 | `Deposited(depositor, amount)` | TrustSync attestation create + publish | None (offchain side-effect) |
 
 ### Report format
 
 - `onReport` entry point is the standard Chainlink CRE `IReceiver` interface
 - `report[0]` = prefix byte routing: `0x01` = event verification, `0x02` = eligibility
-- `0x01` payload: `abi.encode(bytes32 requestId, bool verified)` — contract auto-activates on `verified=true`
+- `0x01` payload: `abi.encode(bytes32 requestId, bool verified)` - contract auto-activates on `verified=true`
 - `0x02` payload: `abi.encode(bytes32 requestId, address[] approvedRecipients, uint8[] tiers)`
 - **Forwarder address (Sepolia):** `0x15fc6ae953e024d975e77382eeec56a9101f9f88`
 
-### Disaster Verification — Real Live Data
+### Disaster Verification - Real Live Data
 
 Pipeline 1 queries three real public APIs. No hardcoded values. CRE runs this inside the Chainlink DON:
 
@@ -124,7 +124,7 @@ The `externalRef` JSON passed to `requestEventVerification` controls how specifi
 // Match any active disaster in a country:
 {"region": "BGD"}
 
-// No filter — confirms global disaster activity (for testing only):
+// No filter - confirms global disaster activity (for testing only):
 {}
 ```
 
@@ -160,7 +160,7 @@ Each event has a claim window set at registration (`claimWindowDays`, 1 to 365).
 
 ### Eligibility Is Private; The Gate Is Onchain
 
-Recipient wallet-to-eligibility mappings are personally identifiable data. Instruxi Enforcer keeps that mapping encrypted and access-controlled. What _is_ onchain: `EligibilitySet(eventId, recipient, tier)` events, written by CRE. The full roster CSV is never onchain. The SHA-256 of the roster CSV is anchored via `anchorRoster()` — anyone can hash the original file and compare.
+Recipient wallet-to-eligibility mappings are personally identifiable data. Instruxi Enforcer keeps that mapping encrypted and access-controlled. What _is_ onchain: `EligibilitySet(eventId, recipient, tier)` events, written by CRE. The full roster CSV is never onchain. The SHA-256 of the roster CSV is anchored via `anchorRoster()` - anyone can hash the original file and compare.
 
 ### OPA Policy Inside the DON
 
@@ -170,9 +170,9 @@ The OPA policy check runs inside the Chainlink DON as part of the CRE `eligibili
 
 Because eligibility is written onchain by CRE before any recipient claims, `claimDisbursement` is a simple synchronous check-and-transfer. No async CRE request/callback cycle at claim time. No poison-pill reverts, no pending request spam, no permanent denial from transient API errors at claim time.
 
-### OPA `policyId` — Staging vs Production
+### OPA `policyId` - Staging vs Production
 
-`workflow/config.staging.json` has a `policyId` field in the `instruxi` object. When this is empty, Pipeline 2 skips OPA and approves all candidate wallets submitted by the admin. This is intentional for staging (you may not have a real Rego policy written yet). For production, populate `policyId` with your configured Instruxi OPA policy ID — only then does CRE enforce policy-gated eligibility.
+`workflow/config.staging.json` has a `policyId` field in the `instruxi` object. When this is empty, Pipeline 2 skips OPA and approves all candidate wallets submitted by the admin. This is intentional for staging (you may not have a real Rego policy written yet). For production, populate `policyId` with your configured Instruxi OPA policy ID - only then does CRE enforce policy-gated eligibility.
 
 > **Security:** Deploying to production with an empty `policyId` means eligibility is entirely admin-controlled. Set a real policy ID before going live.
 
@@ -180,7 +180,7 @@ Because eligibility is written onchain by CRE before any recipient claims, `clai
 
 The contract has a `setExpectedWorkflowId(bytes32)` function (admin-only). When set to a non-zero value, `onReport()` reads the first 32 bytes of the CRE `metadata` parameter and verifies they match the expected workflow ID. This rejects any `onReport` call that didn't originate from your specific CRE workflow. Disabled by default (`bytes32(0)`). To enable, call it after you have a stable deployed workflow ID from the CRE CLI.
 
-### `injectEligibility.ts` — Admin Testing Bypass
+### `injectEligibility.ts` - Admin Testing Bypass
 
 `scripts/injectEligibility.ts` is an admin helper for testing the claim flow without running the full CRE simulation. It:
 1. Calls `requestEligibilityRegistration(eventId, [recipient], [tier])` to get a `requestId`
@@ -199,7 +199,7 @@ npx ts-node --project tsconfig.json scripts/injectEligibility.ts \
 
 ### Event ID Encoding
 
-The `register-event` Hardhat task and the `requestEventVerification` task both accept a human-readable string (e.g. `"MMR-EQ-2025-M77"`) and hash it with `keccak256(toUtf8Bytes(str))` to produce a `bytes32`. The frontend does the same. Always pass the raw string consistently — if you paste a raw `0x` bytes32 anywhere, ensure it came from the same keccak256 hash (not a raw UTF-8 encoding).
+The `register-event` Hardhat task and the `requestEventVerification` task both accept a human-readable string (e.g. `"MMR-EQ-2025-M77"`) and hash it with `keccak256(toUtf8Bytes(str))` to produce a `bytes32`. The frontend does the same. Always pass the raw string consistently - if you paste a raw `0x` bytes32 anywhere, ensure it came from the same keccak256 hash (not a raw UTF-8 encoding).
 
 ### CRE WASM Runtime Constraints
 
@@ -216,7 +216,7 @@ Pipelines 3 and 4 encode the recipient/depositor address inside the EIP-712 atte
 
 `scripts/queryAttestations.ts` extracts the account by regex-matching `/(0x[0-9a-fA-F]{40})/` on the nonce. If you change the nonce format in `logCallback.ts`, update `queryAttestations.ts` to match.
 
-### Instruxi API — User IDs vs Wallet Addresses
+### Instruxi API - User IDs vs Wallet Addresses
 
 The Instruxi Enforcer API uses two distinct identifier types. **They are not interchangeable:**
 - **Wallet address** (`0x...`): used for registration (`POST /auth/register`) and OPA checks
@@ -235,7 +235,7 @@ To get the UUID for a wallet address: `GET /admin/users/resolve?account_address=
 | CRE (Chainlink DON) | Chainlink Forwarder (automated) | Verifies disaster events against live data, validates recipient eligibility via OPA, writes onchain |
 | Recipient | Disaster-affected individual | Claims disbursement from the frontend after CRE writes eligibility |
 
-The admin cannot approve recipients directly or bypass OPA. They set tier amounts at event registration — those amounts are locked and cannot be changed.
+The admin cannot approve recipients directly or bypass OPA. They set tier amounts at event registration - those amounts are locked and cannot be changed.
 
 ---
 
@@ -246,7 +246,7 @@ Enforced by `ReliefTreasury.sol` regardless of what the CRE workflow sends:
 | Invariant | Check |
 |-----------|-------|
 | Event must be Active | `ev.status == EventStatus.Active` |
-| CRE-written eligibility required | `_eligible[eventId][recipient] > 0` — reverts `NotEligible` |
+| CRE-written eligibility required | `_eligible[eventId][recipient] > 0` - reverts `NotEligible` |
 | Eligibility is write-once | First-write-wins; subsequent CRE batches cannot overwrite |
 | No double payment | `_claimed[eventId][recipient] == false` |
 | Tier must be configured | `_eventTierAmounts[eventId][tier] > 0` |
@@ -270,11 +270,11 @@ Enforced by `ReliefTreasury.sol` regardless of what the CRE workflow sends:
 | Sequential `processRoster` | Large rosters require sequential processing | Worker queue + batch API endpoints |
 | Privy embedded wallet signing | Email/Google login users cannot sign claim transactions until the Privy app's recovery method is configured in the Privy dashboard | See below |
 
-### Privy Embedded Wallet — Recovery Method Required
+### Privy Embedded Wallet - Recovery Method Required
 
 Recipients who sign in with **email or Google** get a Privy embedded wallet. Privy's embedded wallets use a 2-of-3 threshold key system. To sign a transaction, Privy must reconstruct the key using a recovery share. **Until the Privy app is configured with a recovery method, signing fails with "Recovery method not supported" and recipients cannot claim.**
 
-**Fix (app owner):** Log into [privy.io/dashboard](https://privy.io/dashboard) → select this app → **Embedded Wallets → Recovery → enable "Privy-managed recovery"**. With Privy-managed recovery, Privy holds the recovery share server-side — no user action required. All email/Google users can then sign transactions immediately.
+**Fix (app owner):** Log into [privy.io/dashboard](https://privy.io/dashboard) → select this app → **Embedded Wallets → Recovery → enable "Privy-managed recovery"**. With Privy-managed recovery, Privy holds the recovery share server-side - no user action required. All email/Google users can then sign transactions immediately.
 
 **Workaround (testing without dashboard access):** Have testers sign in using **Connect Wallet → MetaMask** instead of email/Google. MetaMask handles signing directly and has no recovery method dependency. To register a MetaMask address as eligible, run:
 
@@ -308,7 +308,7 @@ This script is an admin-only helper that bypasses CRE and writes eligibility dir
 | Guard | Mechanism |
 |---|---|
 | No payout unless event is Active | `ev.status == EventStatus.Active` checked before every transfer |
-| No payout without CRE-written eligibility | `_eligible[eventId][recipient] > 0` — set exclusively by Chainlink Forwarder |
+| No payout without CRE-written eligibility | `_eligible[eventId][recipient] > 0` - set exclusively by Chainlink Forwarder |
 | Eligibility cannot be revised | First-write-wins guard |
 | Auto-activation only via CRE | No manual `activateEvent`; CRE controls `Pending → Active` |
 | Claim window before close | Admin cannot close Active event before registered claim window |
@@ -326,7 +326,7 @@ ReliefTreasury.sol
         └── Chainlink DON
               └── CRE workflow (logCallback.ts)
                     ├── USGS / GDACS / NASA EONET (event verification)
-                    └── Instruxi API — OPA policy (eligibility)
+                    └── Instruxi API - OPA policy (eligibility)
 ```
 
 ---
@@ -344,7 +344,7 @@ instruxi-disaster-relief/
 │       └── mocks/MockUSDC.sol      # 6-decimal ERC20 for local testing
 │
 ├── workflow/                       # Chainlink CRE workflow (TypeScript + Bun)
-│   ├── main.ts                     # Entry point — four EVM Log Trigger registrations
+│   ├── main.ts                     # Entry point - four EVM Log Trigger registrations
 │   ├── logCallback.ts              # All four pipeline handlers
 │   ├── workflow.yaml               # CRE CLI config (staging + production targets)
 │   ├── config.staging.json         # Staging runtime config
@@ -352,14 +352,14 @@ instruxi-disaster-relief/
 │   └── package.json
 │
 ├── scripts/                        # Instruxi API integration
-│   ├── instruxi.ts                 # Typed client — Enforcer + RWA Gateway endpoints
+│   ├── instruxi.ts                 # Typed client - Enforcer + RWA Gateway endpoints
 │   ├── setupGroups.ts              # Create Enforcer group hierarchy (run once per program)
 │   ├── onboardRecipient.ts         # Register → profile → groups (single recipient)
 │   ├── uploadRoster.ts             # Upload CSV to Instruxi Object Storage
 │   ├── processRoster.ts            # Ingest roster → provision wallets → archive
 │   ├── createAttestation.ts        # Manual attestation (auditor-signed batch)
 │   ├── queryAttestations.ts        # Query public TrustSync attestations
-│   └── injectEligibility.ts        # Admin bypass — write eligibility onchain without CRE (testing only)
+│   └── injectEligibility.ts        # Admin bypass - write eligibility onchain without CRE (testing only)
 │
 ├── deploy/
 │   ├── 000_deploy_mocks.ts         # MockUSDC (localhost only)
@@ -369,13 +369,13 @@ instruxi-disaster-relief/
 │   └── relief-tasks.ts             # Hardhat tasks (all operational commands)
 │
 ├── test/
-│   └── ReliefTreasury.test.ts      # 39 tests — full contract coverage
+│   └── ReliefTreasury.test.ts      # 39 tests - full contract coverage
 │
 ├── rosters/
 │   └── sample-roster.csv
 │
 ├── project.yaml                    # CRE CLI project settings (RPC endpoints)
-├── secrets.yaml                    # CRE secrets mapping (never commit — see .gitignore)
+├── secrets.yaml                    # CRE secrets mapping (never commit - see .gitignore)
 ├── .env.example
 └── DEPLOYMENT.md                   # Step-by-step setup and execution guide
 ```
@@ -386,15 +386,15 @@ instruxi-disaster-relief/
 
 | File | Description |
 |------|-------------|
-| [`workflow/main.ts`](workflow/main.ts) | CRE workflow entry point — four EVM Log Trigger registrations |
+| [`workflow/main.ts`](workflow/main.ts) | CRE workflow entry point - four EVM Log Trigger registrations |
 | [`workflow/logCallback.ts`](workflow/logCallback.ts) | All pipeline handlers: 2-of-3 disaster API consensus, OPA eligibility batch, TrustSync attestations |
 | [`workflow/workflow.yaml`](workflow/workflow.yaml) | CRE CLI settings (staging + production targets) |
-| [`workflow/config.staging.json`](workflow/config.staging.json) | Staging runtime config — Sepolia, chain selector, gas limit, Instruxi URLs |
-| [`contracts/interfaces/IReceiver.sol`](contracts/interfaces/IReceiver.sol) | Standard Chainlink CRE receiver interface — `onReport()` entry point |
-| [`contracts/ReliefTreasury.sol`](contracts/ReliefTreasury.sol) | Main contract — implements `IReceiver`, routes `onReport()` via prefix byte |
-| [`contracts/interfaces/IReliefTreasury.sol`](contracts/interfaces/IReliefTreasury.sol) | Interface — all events, errors, and function signatures |
-| [`deploy/001_deploy_relief_treasury.ts`](deploy/001_deploy_relief_treasury.ts) | Deploy script — deploys treasury and authorizes Chainlink Forwarder |
-| [`tasks/relief-tasks.ts`](tasks/relief-tasks.ts) | Hardhat tasks — `request-verification` and `request-eligibility` emit `RequestSent` to trigger CRE |
+| [`workflow/config.staging.json`](workflow/config.staging.json) | Staging runtime config - Sepolia, chain selector, gas limit, Instruxi URLs |
+| [`contracts/interfaces/IReceiver.sol`](contracts/interfaces/IReceiver.sol) | Standard Chainlink CRE receiver interface - `onReport()` entry point |
+| [`contracts/ReliefTreasury.sol`](contracts/ReliefTreasury.sol) | Main contract - implements `IReceiver`, routes `onReport()` via prefix byte |
+| [`contracts/interfaces/IReliefTreasury.sol`](contracts/interfaces/IReliefTreasury.sol) | Interface - all events, errors, and function signatures |
+| [`deploy/001_deploy_relief_treasury.ts`](deploy/001_deploy_relief_treasury.ts) | Deploy script - deploys treasury and authorizes Chainlink Forwarder |
+| [`tasks/relief-tasks.ts`](tasks/relief-tasks.ts) | Hardhat tasks - `request-verification` and `request-eligibility` emit `RequestSent` to trigger CRE |
 
 ---
 
@@ -414,8 +414,8 @@ npx hardhat deploy --network sepolia
 | Task | Description |
 |------|-------------|
 | `register-event` | Register a disaster event and lock per-tier payout amounts. Accepts event name string (hashed to `bytes32` with `keccak256`) or raw `0x` bytes32. |
-| `request-verification` | Emit `RequestSent(event_verification)` — triggers CRE Pipeline 1. |
-| `request-eligibility` | Submit candidate batch — emits `RequestSent(eligibility_registration)` to trigger CRE Pipeline 2. |
+| `request-verification` | Emit `RequestSent(event_verification)` - triggers CRE Pipeline 1. |
+| `request-eligibility` | Submit candidate batch - emits `RequestSent(eligibility_registration)` to trigger CRE Pipeline 2. |
 | `claim-disbursement` | Claim from deployer wallet (or any wallet whose private key is in `DEPLOYER_PRIVATE_KEY`). Checks eligibility before attempting. |
 | `anchor-roster` | Anchor SHA-256 of the recipient CSV onchain. Anyone can re-hash the file and verify integrity. |
 | `deposit-usdc` | Approve + deposit USDC into the treasury. |
@@ -434,7 +434,7 @@ npx hardhat deploy --network sepolia
 ```bash
 # Deployment
 DEPLOYER_PRIVATE_KEY=0x...
-CRE_ETH_PRIVATE_KEY=0x...          # Same key with 0x prefix — used by CRE CLI
+CRE_ETH_PRIVATE_KEY=0x...          # Same key with 0x prefix - used by CRE CLI
 ALCHEMY_API_KEY=
 ETHERSCAN_API_KEY=
 
@@ -447,7 +447,7 @@ CHAINLINK_FORWARDER_ADDRESS=0x15fc6ae953e024d975e77382eeec56a9101f9f88
 # Instruxi API
 INSTRUXI_BASE_URL=https://enforcer-v2-dev.instruxi.dev/api/v1/enforcer
 INSTRUXI_API_KEY=
-INSTRUXI_ADMIN_JWT=                 # Privy JWT — expires every hour, refresh from browser
+INSTRUXI_ADMIN_JWT=                 # Privy JWT - expires every hour, refresh from browser
 INSTRUXI_TENANT_ID=
 
 # RWA Gateway
@@ -465,14 +465,14 @@ RELIEF_TREASURY_ADDRESS=
 | Column | Description |
 |--------|-------------|
 | `phone_or_ref` | Phone number or external reference ID |
-| `email` | **Primary identifier** — wallet is provisioned from this via RWA Gateway + Privy |
+| `email` | **Primary identifier** - wallet is provisioned from this via RWA Gateway + Privy |
 | `regionId` | Region code matching an `Eligible:Program:Region` group |
 | `eligibilityStatus` | `eligible` \| `ineligible` \| `pending` |
 | `payoutTier` | `standard` \| `priority` |
 | `first_name` | Optional |
 | `last_name` | Optional |
 
-No wallet address is needed in the CSV. `processRoster` calls `POST /api/privy/server-wallet/create-user` on the RWA Gateway for each eligible row, which provisions a Privy-backed wallet and returns the address. When the recipient later logs in via Privy with their email, Privy restores the pre-provisioned wallet — the same address already registered onchain.
+No wallet address is needed in the CSV. `processRoster` calls `POST /api/privy/server-wallet/create-user` on the RWA Gateway for each eligible row, which provisions a Privy-backed wallet and returns the address. When the recipient later logs in via Privy with their email, Privy restores the pre-provisioned wallet - the same address already registered onchain.
 
 ---
 
